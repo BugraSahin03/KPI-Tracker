@@ -7,6 +7,7 @@ import { STORAGE_KEY } from './lib/storage'
 describe('Heute-Interaktion', () => {
   beforeEach(() => {
     localStorage.clear()
+    window.history.replaceState({}, '', '/')
   })
 
   afterEach(() => {
@@ -76,5 +77,28 @@ describe('Heute-Interaktion', () => {
     await user.keyboard('{Escape}')
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(addButton).toHaveFocus()
+  })
+
+  it('zeigt Demo-Daten an, ohne bestehende lokale Daten zu verändern', async () => {
+    const user = userEvent.setup()
+    const existing = JSON.stringify({
+      version: 1,
+      goals: [],
+      entries: [],
+      bodyMetrics: [],
+    })
+    localStorage.setItem(STORAGE_KEY, existing)
+    window.history.replaceState({}, '', '/?demo=1')
+
+    render(<App />)
+    expect(screen.getByLabelText('Demo-Modus aktiv')).toBeInTheDocument()
+    expect(screen.getByText('Demo-Daten')).toBeInTheDocument()
+
+    const proteinCard = screen.getByText('Protein').closest('article')
+    const failedButton = proteinCard!.querySelector<HTMLButtonElement>('button.failed')
+    await user.click(failedButton!)
+
+    expect(localStorage.getItem(STORAGE_KEY)).toBe(existing)
+    expect(screen.getByRole('link', { name: 'Normaler Modus' })).toHaveAttribute('href', '/')
   })
 })

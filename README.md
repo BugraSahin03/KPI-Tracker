@@ -13,6 +13,7 @@ Pace ist eine mobile-first PWA zum schnellen Erfassen und Auswerten täglicher S
 - Körperwerte für Gewicht und Muskelmasse
 - Versionierte lokale Speicherung im Browser (`localStorage`)
 - Installierbare PWA mit Offline-Cache
+- Sicherer Demo-Modus mit realistischen Beispieldaten unter `/?demo=1`
 - Responsive Oberfläche, Touch-Targets, Safe Areas und Reduced-Motion-Unterstützung
 
 ## Entwicklung

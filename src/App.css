@@ -53,6 +53,64 @@ main {
   padding: 28px 18px calc(108px + env(safe-area-inset-bottom));
 }
 
+.demo-banner {
+  min-height: 53px;
+  margin: -10px 0 22px;
+  padding: 9px 10px 9px 13px;
+  display: grid;
+  grid-template-columns: 24px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid rgba(167, 139, 250, 0.3);
+  border-radius: 14px;
+  color: var(--purple);
+  background: rgba(167, 139, 250, 0.08);
+}
+
+.demo-banner > svg {
+  width: 18px;
+}
+
+.demo-banner p {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.demo-banner strong {
+  color: #d8cbff;
+  font-size: 0.7rem;
+}
+
+.demo-banner span {
+  margin-top: 1px;
+  color: #9e94ba;
+  font-size: 0.65rem;
+}
+
+.demo-banner a {
+  min-height: 40px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(167, 139, 250, 0.3);
+  border-radius: 9px;
+  color: #d8cbff;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.demo-banner a:hover {
+  background: rgba(167, 139, 250, 0.12);
+}
+
+.demo-banner a:focus-visible {
+  outline: 2px solid var(--purple);
+  outline-offset: 3px;
+}
+
 .view {
   animation: view-enter 260ms ease both;
 }
@@ -1532,6 +1590,15 @@ fieldset legend {
   .content {
     padding-right: 13px;
     padding-left: 13px;
+  }
+
+  .demo-banner {
+    grid-template-columns: 21px 1fr;
+  }
+
+  .demo-banner a {
+    grid-column: 2;
+    width: max-content;
   }
 
   .status-button {

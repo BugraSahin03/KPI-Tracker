@@ -58,6 +58,7 @@ import {
 import { calculateStats, dayStatus, goalsForDate, statusFor } from './lib/stats'
 import { loadData, makeId, saveData, setEntryStatus, toggleGoalActive } from './lib/storage'
 import type { AppData, BodyMetric, Goal, GoalIcon, GoalStatus, Period } from './types'
+import { createDemoData } from './lib/demo'
 
 type Tab = 'today' | 'history' | 'insights' | 'goals' | 'body'
 
@@ -85,6 +86,19 @@ function Brand() {
       </span>
       <span>PACE</span>
     </div>
+  )
+}
+
+function DemoBanner() {
+  return (
+    <aside className="demo-banner" aria-label="Demo-Modus aktiv">
+      <Sparkles size={17} aria-hidden="true" />
+      <p>
+        <strong>Demo-Daten</strong>
+        <span>Änderungen werden nicht gespeichert.</span>
+      </p>
+      <a href={window.location.pathname}>Normaler Modus</a>
+    </aside>
   )
 }
 
@@ -1017,13 +1031,16 @@ const navItems: { id: Tab; label: string; icon: typeof Activity }[] = [
 ]
 
 function App() {
-  const [data, setData] = useState<AppData>(() => loadData())
+  const [isDemo] = useState(
+    () => new URLSearchParams(window.location.search).get('demo') === '1',
+  )
+  const [data, setData] = useState<AppData>(() => (isDemo ? createDemoData() : loadData()))
   const [tab, setTab] = useState<Tab>('today')
   const [selectedDate, setSelectedDate] = useState(todayKey())
 
   useEffect(() => {
-    saveData(data)
-  }, [data])
+    if (!isDemo) saveData(data)
+  }, [data, isDemo])
 
   const updateStatus = (goalId: string, status: GoalStatus) => {
     if (selectedDate > todayKey()) return
@@ -1063,6 +1080,7 @@ function App() {
       <main>
         <div className="mobile-brand"><Brand /><span>{format(new Date(), 'd. MMM', { locale: de })}</span></div>
         <div className="content">
+          {isDemo && <DemoBanner />}
           {tab === 'today' && (
             <TodayView data={data} selectedDate={selectedDate} onDate={setSelectedDate} onStatus={updateStatus} onOpenGoals={() => setTab('goals')} />
           )}
