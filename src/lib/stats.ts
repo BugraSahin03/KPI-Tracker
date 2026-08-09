@@ -1,5 +1,5 @@
 import { differenceInCalendarDays, isSameDay, subDays } from 'date-fns'
-import type { AppData, Goal, GoalStatus, Period } from '../types'
+import type { AppData, BodyMetric, Goal, GoalStatus, Period } from '../types'
 import { dateRange, periodBounds, toDateKey } from './date'
 
 export interface GoalStat {
@@ -16,6 +16,20 @@ export interface Stats {
   currentStreak: number
   bestStreak: number
   perGoal: GoalStat[]
+}
+
+export interface DayGoalProgress {
+  done: number
+  total: number
+  ratio: number
+}
+
+export function sortBodyMetricsNewestFirst(metrics: BodyMetric[]) {
+  return [...metrics].sort((a, b) =>
+    b.date.localeCompare(a.date) ||
+    Date.parse(b.measuredAt ?? b.createdAt) - Date.parse(a.measuredAt ?? a.createdAt) ||
+    b.id.localeCompare(a.id),
+  )
 }
 
 export function goalIsScheduledOn(goal: Goal, date: string) {
@@ -36,6 +50,16 @@ export function statusFor(data: AppData, goalId: string, date: string): GoalStat
   return (
     data.entries.find((entry) => entry.goalId === goalId && entry.date === date)?.status ?? 'open'
   )
+}
+
+export function dayGoalProgress(data: AppData, date: string): DayGoalProgress {
+  const goals = goalsForDate(data, date)
+  const done = goals.filter((goal) => statusFor(data, goal.id, date) === 'done').length
+  return {
+    done,
+    total: goals.length,
+    ratio: goals.length === 0 ? 0 : done / goals.length,
+  }
 }
 
 export function dayStatus(data: AppData, date: string): GoalStatus {

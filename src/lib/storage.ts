@@ -6,9 +6,11 @@ import type {
   GoalActivityPeriod,
   GoalIcon,
   GoalStatus,
-} from '../types'
+  GymSession,
+  GymTemplate,
+} from '../types.js'
 import { isValid, parseISO } from 'date-fns'
-import { todayKey } from './date'
+import { todayKey } from './date.js'
 
 export const STORAGE_KEY = 'pace-tracker-data'
 const DEFAULT_START_DATE = '2020-01-01'
@@ -34,9 +36,19 @@ export const DEFAULT_GOALS: GoalBlueprint[] = [
   },
 ]
 
+export function createDefaultGymTemplates(timestamp = new Date().toISOString()): GymTemplate[] {
+  return ['Push', 'Pull', 'Beine'].map((name) => ({
+    id: `gym-template-${name.toLowerCase()}`,
+    name,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    exercises: [],
+  }))
+}
+
 export function createInitialData(startDate = todayKey()): AppData {
   return {
-    version: 2,
+    version: 3,
     goals: DEFAULT_GOALS.map((goal) => ({
       ...goal,
       active: true,
@@ -45,6 +57,8 @@ export function createInitialData(startDate = todayKey()): AppData {
     })),
     entries: [],
     bodyMetrics: [],
+    gymTemplates: createDefaultGymTemplates(`${startDate}T00:00:00.000Z`),
+    gymSessions: [],
   }
 }
 
@@ -70,7 +84,15 @@ function isActivityPeriod(value: unknown): value is GoalActivityPeriod {
   )
 }
 
-function isGoal(value: unknown): value is Goal {
+function isIdentifier(value: unknown) {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(value)
+}
+
+function isTimestamp(value: unknown) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && isValid(parseISO(value)) && !Number.isNaN(Date.parse(value))
+}
+
+export function isGoal(value: unknown): value is Goal {
   const periods = isRecord(value) && Array.isArray(value.activityPeriods)
     ? value.activityPeriods
     : []
@@ -86,9 +108,9 @@ function isGoal(value: unknown): value is Goal {
 
   return (
     isRecord(value) &&
-    typeof value.id === 'string' &&
-    typeof value.name === 'string' &&
-    typeof value.unit === 'string' &&
+    isIdentifier(value.id) &&
+    typeof value.name === 'string' && value.name.trim().length > 0 && value.name.length <= 40 &&
+    typeof value.unit === 'string' && value.unit.trim().length > 0 && value.unit.length <= 8 &&
     typeof value.target === 'number' &&
     Number.isFinite(value.target) &&
     value.target > 0 &&
@@ -118,20 +140,20 @@ function isLegacyGoal(value: unknown): value is Omit<Goal, 'activityPeriods'> {
   )
 }
 
-function isEntry(value: unknown): value is DailyEntry {
+export function isEntry(value: unknown): value is DailyEntry {
   return (
     isRecord(value) &&
-    typeof value.goalId === 'string' &&
+    isIdentifier(value.goalId) &&
     isDateKey(value.date) &&
     (value.status === 'done' || value.status === 'failed') &&
-    typeof value.updatedAt === 'string'
+    isTimestamp(value.updatedAt)
   )
 }
 
-function isBodyMetric(value: unknown): value is BodyMetric {
+export function isBodyMetric(value: unknown): value is BodyMetric {
   return (
     isRecord(value) &&
-    typeof value.id === 'string' &&
+    isIdentifier(value.id) &&
     isDateKey(value.date) &&
     (value.weightKg === undefined ||
       (typeof value.weightKg === 'number' &&
@@ -143,8 +165,95 @@ function isBodyMetric(value: unknown): value is BodyMetric {
         Number.isFinite(value.muscleMassKg) &&
         value.muscleMassKg > 0 &&
         value.muscleMassKg <= 300)) &&
-    typeof value.createdAt === 'string'
+    (value.bodyFatPercent === undefined ||
+      (typeof value.bodyFatPercent === 'number' && Number.isFinite(value.bodyFatPercent) && value.bodyFatPercent >= 0 && value.bodyFatPercent <= 100)) &&
+    (value.bmi === undefined ||
+      (typeof value.bmi === 'number' && Number.isFinite(value.bmi) && value.bmi > 0 && value.bmi <= 150)) &&
+    (value.leanBodyMassKg === undefined ||
+      (typeof value.leanBodyMassKg === 'number' && Number.isFinite(value.leanBodyMassKg) && value.leanBodyMassKg > 0 && value.leanBodyMassKg <= 500)) &&
+    (value.source === undefined || ['manual', 'google-health', 'local-import', 'mixed'].includes(value.source as string)) &&
+    (value.measuredAt === undefined || isTimestamp(value.measuredAt)) &&
+    (value.externalId === undefined || (typeof value.externalId === 'string' && value.externalId.length <= 500)) &&
+    isTimestamp(value.createdAt) &&
+    [value.weightKg, value.muscleMassKg, value.bodyFatPercent, value.bmi, value.leanBodyMassKg].some((item) => item !== undefined)
   )
+}
+
+function orderedUniqueExercises(
+  exercises: unknown[],
+  validator: (exercise: unknown) => boolean,
+) {
+  if (exercises.length > 30 || !exercises.every(validator)) return false
+  const records = exercises as Record<string, unknown>[]
+  const ids = records.map((exercise) => String(exercise.id))
+  const names = records.map((exercise) => String(exercise.name).trim().toLocaleLowerCase('de-DE'))
+  return new Set(ids).size === ids.length && new Set(names).size === names.length &&
+    records.every((exercise, index) => exercise.position === index)
+}
+
+function validExerciseNumbers(value: Record<string, unknown>, weightKey: 'targetWeightKg' | 'weightKg') {
+  const weight = value[weightKey]
+  return Number.isInteger(value.sets) && Number(value.sets) >= 1 && Number(value.sets) <= 20 &&
+    Number.isInteger(value[weightKey === 'targetWeightKg' ? 'targetReps' : 'reps']) &&
+    Number(value[weightKey === 'targetWeightKg' ? 'targetReps' : 'reps']) >= 1 &&
+    Number(value[weightKey === 'targetWeightKg' ? 'targetReps' : 'reps']) <= 100 &&
+    (weight === undefined || (typeof weight === 'number' && Number.isFinite(weight) && weight >= 0 && weight <= 1000))
+}
+
+export function isGymTemplate(value: unknown): value is GymTemplate {
+  if (!isRecord(value) || !Array.isArray(value.exercises)) return false
+  return isIdentifier(value.id) && typeof value.name === 'string' && value.name.trim().length > 0 && value.name.length <= 50 &&
+    isTimestamp(value.createdAt) && isTimestamp(value.updatedAt) &&
+    orderedUniqueExercises(value.exercises, (exercise) => isRecord(exercise) && isIdentifier(exercise.id) &&
+      typeof exercise.name === 'string' && exercise.name.trim().length > 0 && exercise.name.length <= 80 &&
+      Number.isInteger(exercise.position) && validExerciseNumbers(exercise, 'targetWeightKg'))
+}
+
+export function isGymSession(value: unknown): value is GymSession {
+  if (!isRecord(value) || !Array.isArray(value.exercises)) return false
+  return isIdentifier(value.id) && (value.templateId === undefined || isIdentifier(value.templateId)) &&
+    typeof value.templateName === 'string' && value.templateName.trim().length > 0 && value.templateName.length <= 50 &&
+    isDateKey(value.date) && isTimestamp(value.startedAt) && isTimestamp(value.completedAt) &&
+    Date.parse(String(value.startedAt)) <= Date.parse(String(value.completedAt)) && value.exercises.length > 0 &&
+    orderedUniqueExercises(value.exercises, (exercise) => isRecord(exercise) && isIdentifier(exercise.id) &&
+      (exercise.templateExerciseId === undefined || isIdentifier(exercise.templateExerciseId)) &&
+      typeof exercise.name === 'string' && exercise.name.trim().length > 0 && exercise.name.length <= 80 &&
+      Number.isInteger(exercise.position) && validExerciseNumbers(exercise, 'weightKg'))
+}
+
+export function isAppData(value: unknown): value is AppData {
+  if (!isRecord(value)) return false
+  if (value.version === 1) return migrateV1(value) !== null
+  if (value.version === 2) return migrateV2(value) !== null
+  if (!(
+    value.version === 3 &&
+    Array.isArray(value.goals) && value.goals.every(isGoal) &&
+    Array.isArray(value.entries) && value.entries.every(isEntry) &&
+    Array.isArray(value.bodyMetrics) && value.bodyMetrics.every(isBodyMetric) &&
+    Array.isArray(value.gymTemplates) && value.gymTemplates.every(isGymTemplate) &&
+    Array.isArray(value.gymSessions) && value.gymSessions.every(isGymSession)
+  )) return false
+  const goals = value.goals as Goal[]
+  const entries = value.entries as DailyEntry[]
+  const metrics = value.bodyMetrics as BodyMetric[]
+  const goalIds = new Set(goals.map((goal) => goal.id))
+  const entryKeys = new Set(entries.map((entry) => `${entry.goalId}\0${entry.date}`))
+  const metricIds = new Set(metrics.map((metric) => metric.id))
+  const externalIds = metrics.flatMap((metric) => metric.externalId ? [metric.externalId] : [])
+  const templates = value.gymTemplates as GymTemplate[]
+  const sessions = value.gymSessions as GymSession[]
+  return goalIds.size === goals.length && metricIds.size === metrics.length &&
+    new Set(externalIds).size === externalIds.length && entryKeys.size === entries.length &&
+    entries.every((entry) => goalIds.has(entry.goalId)) &&
+    new Set(templates.map((template) => template.id)).size === templates.length &&
+    new Set(sessions.map((session) => session.id)).size === sessions.length
+}
+
+export function normalizeAppData(value: unknown): AppData | null {
+  if (!isRecord(value)) return null
+  if (value.version === 1) return migrateV1(value)
+  if (value.version === 2) return migrateV2(value)
+  return isAppData(value) && value.version === 3 ? value : null
 }
 
 function migrateV1(parsed: Record<string, unknown>): AppData | null {
@@ -182,11 +291,28 @@ function migrateV1(parsed: Record<string, unknown>): AppData | null {
   })
 
   return {
-    version: 2,
+    version: 3,
     goals,
     entries,
     bodyMetrics: parsed.bodyMetrics,
+    gymTemplates: createDefaultGymTemplates(),
+    gymSessions: [],
   }
+}
+
+function migrateV2(parsed: Record<string, unknown>): AppData | null {
+  if (!Array.isArray(parsed.goals) || !parsed.goals.every(isGoal) ||
+    !Array.isArray(parsed.entries) || !parsed.entries.every(isEntry) ||
+    !Array.isArray(parsed.bodyMetrics) || !parsed.bodyMetrics.every(isBodyMetric)) return null
+  const migrated = {
+    version: 3 as const,
+    goals: parsed.goals,
+    entries: parsed.entries,
+    bodyMetrics: parsed.bodyMetrics,
+    gymTemplates: createDefaultGymTemplates(),
+    gymSessions: [],
+  }
+  return isAppData(migrated) ? migrated : null
 }
 
 export function loadData(storage: Pick<Storage, 'getItem'> = localStorage): AppData {
@@ -194,25 +320,11 @@ export function loadData(storage: Pick<Storage, 'getItem'> = localStorage): AppD
     const raw = storage.getItem(STORAGE_KEY)
     if (!raw) return createInitialData()
     const parsed: unknown = JSON.parse(raw)
-    if (!isRecord(parsed)) return createInitialData()
-    if (parsed.version === 1) return migrateV1(parsed) ?? createInitialData()
-    if (
-      parsed.version !== 2 ||
-      !Array.isArray(parsed.goals) ||
-      !parsed.goals.every(isGoal) ||
-      !Array.isArray(parsed.entries) ||
-      !parsed.entries.every(isEntry) ||
-      !Array.isArray(parsed.bodyMetrics) ||
-      !parsed.bodyMetrics.every(isBodyMetric)
-    ) {
+    const normalized = normalizeAppData(parsed)
+    if (!normalized) {
       return createInitialData()
     }
-    return {
-      version: 2,
-      goals: parsed.goals,
-      entries: parsed.entries,
-      bodyMetrics: parsed.bodyMetrics,
-    }
+    return normalized
   } catch {
     return createInitialData()
   }

@@ -6,7 +6,7 @@ import {
   startOfMonth,
   subMonths,
 } from 'date-fns'
-import type { AppData, BodyMetric, DailyEntry, GoalStatus } from '../types'
+import type { AppData, BodyMetric, DailyEntry, GoalStatus, GymSession, GymTemplateExercise } from '../types'
 import { dateRange, toDateKey } from './date'
 import { createInitialData } from './storage'
 
@@ -46,6 +46,12 @@ export function createDemoData(anchor = new Date()): AppData {
   const normalizedAnchor = startOfDay(anchor)
   const start = startOfMonth(subMonths(normalizedAnchor, 11))
   const data = createInitialData(toDateKey(start))
+  const programs: Record<string, Omit<GymTemplateExercise, 'id' | 'position'>[]> = {
+    Push: [{ name: 'Bankdrücken', sets: 3, targetWeightKg: 70, targetReps: 8 }, { name: 'Schulterdrücken', sets: 3, targetWeightKg: 32.5, targetReps: 10 }],
+    Pull: [{ name: 'Latzug', sets: 3, targetWeightKg: 60, targetReps: 10 }, { name: 'Rudern', sets: 3, targetWeightKg: 55, targetReps: 10 }],
+    Beine: [{ name: 'Kniebeugen', sets: 3, targetWeightKg: 80, targetReps: 8 }, { name: 'Beinpresse', sets: 3, targetWeightKg: 140, targetReps: 10 }],
+  }
+  data.gymTemplates = data.gymTemplates.map((template) => ({ ...template, exercises: (programs[template.name] ?? []).map((exercise, position) => ({ ...exercise, id: `demo-${template.name}-${position}`, position })) }))
   const entries: DailyEntry[] = []
 
   for (const date of dateRange(start, normalizedAnchor)) {
@@ -80,9 +86,27 @@ export function createDemoData(anchor = new Date()): AppData {
     })
   }
 
+  const gymSessions: GymSession[] = []
+  for (let offset = 10; offset <= Math.min(totalDays, 84); offset += 3) {
+    const sessionDate = new Date(normalizedAnchor)
+    sessionDate.setDate(sessionDate.getDate() - offset)
+    const template = data.gymTemplates[gymSessions.length % data.gymTemplates.length]!
+    const date = toDateKey(sessionDate)
+    gymSessions.push({
+      id: `demo-session-${date}`,
+      templateId: template.id,
+      templateName: template.name,
+      date,
+      startedAt: `${date}T17:30:00.000Z`,
+      completedAt: `${date}T18:35:00.000Z`,
+      exercises: template.exercises.map((exercise) => ({ id: `demo-session-${date}-${exercise.position}`, templateExerciseId: exercise.id, name: exercise.name, sets: exercise.sets, weightKg: exercise.targetWeightKg, reps: exercise.targetReps, position: exercise.position })),
+    })
+  }
+
   return {
     ...data,
     entries,
     bodyMetrics,
+    gymSessions,
   }
 }

@@ -2,8 +2,8 @@ import {
   Activity,
   BarChart3,
   Beef,
-  CalendarDays,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   CircleGauge,
@@ -13,7 +13,6 @@ import {
   History,
   Medal,
   Moon,
-  MoreHorizontal,
   Pencil,
   Plus,
   RotateCcw,
@@ -43,7 +42,8 @@ import {
   startOfMonth,
 } from 'date-fns'
 import { de } from 'date-fns/locale'
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from 'react'
+import { createPortal } from 'react-dom'
 import './App.css'
 import {
   dateRange,
@@ -55,12 +55,15 @@ import {
   toDateKey,
   todayKey,
 } from './lib/date'
-import { calculateStats, dayStatus, goalsForDate, statusFor } from './lib/stats'
-import { loadData, makeId, saveData, setEntryStatus, toggleGoalActive } from './lib/storage'
-import type { AppData, BodyMetric, Goal, GoalIcon, GoalStatus, Period } from './types'
+import { calculateStats, dayGoalProgress, goalsForDate, sortBodyMetricsNewestFirst, statusFor } from './lib/stats'
+import { loadData, makeId, setEntryStatus, STORAGE_KEY, toggleGoalActive } from './lib/storage'
+import { DEFAULT_PROFILE_ID, type AppData, type BodyMetric, type DataMutation, type Goal, type GoalIcon, type GoalStatus, type Period, type Profile, type ProfileId } from './types'
 import { createDemoData } from './lib/demo'
+import { api, ApiError, type GoogleHealthStatus } from './lib/api'
+import { applyPendingMutations, loadPendingMutations, persistPendingMutations, type PendingMutation } from './lib/pendingMutations'
+import GymView from './GymView'
 
-type Tab = 'today' | 'history' | 'insights' | 'goals' | 'body'
+type Tab = 'today' | 'gym' | 'insights' | 'goals' | 'body'
 
 const periodNames: Record<Period, string> = {
   week: 'Woche',
@@ -69,6 +72,61 @@ const periodNames: Record<Period, string> = {
 }
 
 const goalColors = ['#c6ff3d', '#4dc5ff', '#a78bfa', '#ff9f43', '#ff607f']
+const PROFILE_STORAGE_KEY = 'pace-active-profile-v1'
+const DEMO_PROFILE_STORAGE_KEY = 'pace-demo-active-profile-v1'
+const BUILTIN_PROFILES: Profile[] = [
+  { id: 'profile-bugra', name: 'Bugra', initial: 'B', color: '#c6ff3d' },
+  { id: 'profile-sena', name: 'Sena', initial: 'S', color: '#a78bfa' },
+]
+
+function emptyData(): AppData {
+  return { version: 3, goals: [], entries: [], bodyMetrics: [], gymTemplates: [], gymSessions: [] }
+}
+
+function storedProfile(key: string): ProfileId {
+  try {
+    const value = localStorage.getItem(key)
+    return value === 'profile-sena' ? value : DEFAULT_PROFILE_ID
+  } catch { return DEFAULT_PROFILE_ID }
+}
+
+function ProfileSwitcher({ profile, profiles, onSelect }: { profile: Profile; profiles: Profile[]; onSelect: (id: ProfileId) => void }) {
+  const [open, setOpen] = useState(false)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    if (!open) return
+    dialogRef.current?.querySelector<HTMLButtonElement>('[data-active="true"]')?.focus()
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); setOpen(false); triggerRef.current?.focus() }
+      if (event.key !== 'Tab' || !dialogRef.current) return
+      const items = [...dialogRef.current.querySelectorAll<HTMLButtonElement>('button')]
+      if (!items.length) return
+      const first = items[0]!, last = items[items.length - 1]!
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+    }
+    document.addEventListener('keydown', keydown)
+    return () => document.removeEventListener('keydown', keydown)
+  }, [open])
+  return <div className="profile-switcher">
+    <button ref={triggerRef} type="button" className="profile-trigger" aria-label={`Profil: ${profile.name}`} aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(true)}>
+      <span className="profile-avatar" style={{ '--profile-color': profile.color } as CSSProperties}>{profile.initial}</span>
+      <span>{profile.name}</span><ChevronDown aria-hidden="true" />
+    </button>
+    {open && createPortal(<div className="profile-backdrop" onMouseDown={() => { setOpen(false); triggerRef.current?.focus() }}>
+      <div ref={dialogRef} className="profile-menu" role="dialog" aria-modal="true" aria-labelledby="profile-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
+        <div><strong id="profile-dialog-title">Profil wählen</strong><button type="button" className="mini-action" aria-label="Schließen" onClick={() => { setOpen(false); triggerRef.current?.focus() }}><X /></button></div>
+        <div className="profile-options" aria-label="Profile">
+          {profiles.map((item) => <button key={item.id} type="button" data-active={item.id === profile.id} aria-current={item.id === profile.id ? 'true' : undefined} aria-label={item.id === profile.id ? `${item.name} – aktuelles Profil` : `Zu ${item.name} wechseln`} onClick={() => { onSelect(item.id); setOpen(false); triggerRef.current?.focus() }}>
+            <span className="profile-avatar" style={{ '--profile-color': item.color } as CSSProperties}>{item.initial}</span><span><strong>{item.name}</strong><small>{item.id === profile.id ? 'Aktiv' : 'Wechseln'}</small></span>{item.id === profile.id && <Check />}
+          </button>)}
+        </div>
+        <p>Kein Login – beide Profile sind auf diesem Gerät zugänglich.</p>
+      </div>
+    </div>, document.body)}
+  </div>
+}
 
 function GoalGlyph({ icon, size = 24 }: { icon: GoalIcon; size?: number }) {
   if (icon === 'protein') return <Beef size={size} aria-hidden="true" />
@@ -343,27 +401,47 @@ function DayTile({
   data,
   onSelect,
   muted = false,
+  forceDisabled = false,
 }: {
   date: Date
   data: AppData
   onSelect: (date: string) => void
   muted?: boolean
+  forceDisabled?: boolean
 }) {
   const key = toDateKey(date)
-  const future = isAfter(date, new Date())
-  const status = future ? 'open' : dayStatus(data, key)
+  const future = forceDisabled || isAfter(date, new Date())
+  const progress = dayGoalProgress(data, key)
+  const hasGoals = !future && progress.total > 0
+  const partial = hasGoals && progress.done > 0 && progress.done < progress.total
+  const progressClass = !hasGoals
+    ? 'open'
+    : progress.done === progress.total
+      ? 'done'
+      : progress.done === 0
+        ? 'failed'
+        : 'partial'
+  const progressLabel = future
+    ? 'noch nicht verfügbar'
+    : progress.total === 0
+      ? 'keine aktiven Ziele'
+      : `${progress.done} von ${progress.total} Zielen erfüllt`
+  const progressStyle = partial
+    ? ({ '--goal-progress': `${progress.ratio * 100}%` } as CSSProperties)
+    : undefined
   return (
     <button
       type="button"
-      className={`day-tile ${status} ${muted ? 'muted' : ''} ${key === todayKey() ? 'today' : ''}`}
+      className={`day-tile ${progressClass} ${muted ? 'muted' : ''} ${key === todayKey() ? 'today' : ''}`}
+      style={progressStyle}
       onClick={() => onSelect(key)}
       disabled={future}
-      aria-label={`${format(date, 'd. MMMM yyyy', { locale: de })}: ${
-        status === 'done' ? 'erfüllt' : status === 'failed' ? 'fehlgeschlagen' : 'offen'
-      }`}
+      aria-label={`${format(date, 'd. MMMM yyyy', { locale: de })}: ${progressLabel}`}
     >
       <span>{format(date, 'd')}</span>
-      <i aria-hidden="true" />
+      {partial
+        ? <small className="progress-badge" aria-hidden="true">{progress.done}/{progress.total}</small>
+        : <i className="status-dot" aria-hidden="true" />}
     </button>
   )
 }
@@ -380,6 +458,7 @@ function MonthCalendar({
   const start = startOfMonth(anchor)
   const offset = getISODay(start) - 1
   const dates = dateRange(addDays(start, -offset), addDays(endOfMonth(anchor), 7 - getISODay(endOfMonth(anchor))))
+  const futurePeriod = start > new Date()
   return (
     <div className="calendar-panel">
       <div className="weekday-row" aria-hidden="true">
@@ -395,6 +474,7 @@ function MonthCalendar({
             data={data}
             onSelect={onSelect}
             muted={!isSameMonth(fromDateKey(key), anchor)}
+            forceDisabled={futurePeriod}
           />
         ))}
       </div>
@@ -413,37 +493,17 @@ function WeekCalendar({
 }) {
   const { start, end } = periodBounds('week', anchor)
   return (
-    <div className="week-list">
-      {dateRange(start, end).map((key) => {
-        const date = fromDateKey(key)
-        const future = key > todayKey()
-        const status = future ? 'open' : dayStatus(data, key)
-        const goals = goalsForDate(data, key)
-        const done = goals.filter((goal) => statusFor(data, goal.id, key) === 'done').length
-        return (
-          <button
-            type="button"
-            className={`week-row ${status}`}
-            onClick={() => onSelect(key)}
-            disabled={future}
-            key={key}
-          >
-            <span className="week-date">
-              <small>{format(date, 'EEE', { locale: de })}</small>
-              <strong>{format(date, 'dd')}</strong>
-            </span>
-            <span className="week-progress">
-              <strong>{key === todayKey() ? 'Heute' : format(date, 'd. MMMM', { locale: de })}</strong>
-              <small>
-                {done} von {goals.length} erfüllt
-              </small>
-            </span>
-            <span className="week-indicator">
-              {status === 'done' ? <Check /> : status === 'failed' ? <X /> : <MoreHorizontal />}
-            </span>
-          </button>
-        )
-      })}
+    <div className="calendar-panel week-calendar">
+      <div className="weekday-row" aria-hidden="true">
+        {['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'].map((day) => (
+          <span key={day}>{day}</span>
+        ))}
+      </div>
+      <div className="week-grid" role="group" aria-label={periodLabel('week', anchor)}>
+        {dateRange(start, end).map((key) => (
+          <DayTile key={key} date={fromDateKey(key)} data={data} onSelect={onSelect} />
+        ))}
+      </div>
     </div>
   )
 }
@@ -475,14 +535,7 @@ function YearCalendar({
             <strong>{format(month, 'MMM', { locale: de })}</strong>
             <div className="heatmap-cells">
               {keys.map((key) => (
-                <button
-                  type="button"
-                  className={isAfter(fromDateKey(key), new Date()) ? 'open' : dayStatus(data, key)}
-                  aria-label={`${formatShortDate(key)} öffnen`}
-                  onClick={() => onSelect(key)}
-                  disabled={isAfter(fromDateKey(key), new Date())}
-                  key={key}
-                />
+                <YearDayTile key={key} dateKey={key} data={data} onSelect={onSelect} />
               ))}
             </div>
           </div>
@@ -490,6 +543,7 @@ function YearCalendar({
       })}
       <div className="legend">
         <span><i className="done" /> Erfüllt</span>
+        <span><i className="partial" /> Teilweise</span>
         <span><i className="failed" /> Verfehlt</span>
         <span><i className="open" /> Offen</span>
       </div>
@@ -497,23 +551,68 @@ function YearCalendar({
   )
 }
 
+function YearDayTile({
+  dateKey,
+  data,
+  onSelect,
+}: {
+  dateKey: string
+  data: AppData
+  onSelect: (date: string) => void
+}) {
+  const date = fromDateKey(dateKey)
+  const future = isAfter(date, new Date())
+  const progress = dayGoalProgress(data, dateKey)
+  const hasGoals = !future && progress.total > 0
+  const progressClass = !hasGoals
+    ? 'open'
+    : progress.done === progress.total
+      ? 'done'
+      : progress.done === 0
+        ? 'failed'
+        : 'partial'
+  const progressLabel = future
+    ? 'noch nicht verfügbar'
+    : progress.total === 0
+      ? 'keine aktiven Ziele'
+      : `${progress.done} von ${progress.total} Zielen erfüllt`
+
+  return (
+    <button
+      type="button"
+      className={progressClass}
+      style={progressClass === 'partial'
+        ? ({ '--goal-progress': `${progress.ratio * 100}%` } as CSSProperties)
+        : undefined}
+      aria-label={`${formatShortDate(dateKey)}: ${progressLabel}`}
+      onClick={() => onSelect(dateKey)}
+      disabled={future}
+    />
+  )
+}
+
 function HistoryView({
   data,
   onSelectDay,
+  period,
+  anchor,
+  onPeriodChange,
+  onAnchorChange,
 }: {
   data: AppData
   onSelectDay: (date: string) => void
+  period: Period
+  anchor: Date
+  onPeriodChange: (period: Period) => void
+  onAnchorChange: (anchor: Date) => void
 }) {
-  const [period, setPeriod] = useState<Period>('month')
-  const [anchor, setAnchor] = useState(new Date())
-
   const move = (direction: number) => {
-    setAnchor((current) =>
+    onAnchorChange(
       period === 'week'
-        ? addWeeks(current, direction)
+        ? addWeeks(anchor, direction)
         : period === 'month'
-          ? addMonths(current, direction)
-          : addYears(current, direction),
+          ? addMonths(anchor, direction)
+          : addYears(anchor, direction),
     )
   }
 
@@ -524,12 +623,12 @@ function HistoryView({
   return (
     <section className="view">
       <PageIntro eyebrow="Dein Rhythmus" title="Verlauf" />
-      <PeriodControl value={period} onChange={setPeriod} />
+      <PeriodControl value={period} onChange={onPeriodChange} />
       <DateStepper
         label={periodLabel(period, anchor)}
         onPrevious={() => move(-1)}
         onNext={() => move(1)}
-        onToday={() => setAnchor(new Date())}
+        onToday={() => onAnchorChange(new Date())}
         isCurrent={
           period === 'year'
             ? anchor.getFullYear() === new Date().getFullYear()
@@ -537,6 +636,7 @@ function HistoryView({
               ? isSameISOWeek(anchor, new Date())
               : isSameMonth(anchor, new Date())
         }
+        nextDisabled={periodBounds(period, anchor).start > new Date()}
       />
       {period === 'week' ? (
         <WeekCalendar anchor={anchor} data={data} onSelect={select} />
@@ -567,17 +667,21 @@ function Ring({ value }: { value: number }) {
   )
 }
 
-function InsightsView({ data }: { data: AppData }) {
-  const [period, setPeriod] = useState<Period>('month')
-  const stats = useMemo(() => calculateStats(data, period), [data, period])
+function InsightsView({ data, period, anchor }: { data: AppData; period: Period; anchor: Date }) {
+  const stats = useMemo(() => calculateStats(data, period, anchor), [data, period, anchor])
+  const isCurrent =
+    period === 'year'
+      ? anchor.getFullYear() === new Date().getFullYear()
+      : period === 'week'
+        ? isSameISOWeek(anchor, new Date())
+        : isSameMonth(anchor, new Date())
   return (
     <section className="view">
       <PageIntro eyebrow="Was funktioniert" title="Insights" />
-      <PeriodControl value={period} onChange={setPeriod} />
       <article className="insight-hero">
         <div>
           <p>Erfüllungsquote</p>
-          <h2>{periodNames[period]} im Blick</h2>
+          <h2>{periodLabel(period, anchor)}</h2>
           <span>
             {stats.done} von {stats.total} Check-ins
           </span>
@@ -588,7 +692,7 @@ function InsightsView({ data }: { data: AppData }) {
         <article className="stat-card">
           <span className="stat-icon"><Flame /></span>
           <div><strong>{stats.currentStreak}</strong><small>Tage</small></div>
-          <p>Aktuelle Serie</p>
+          <p>{isCurrent ? 'Aktuelle Serie' : 'Serie am Periodenende'}</p>
         </article>
         <article className="stat-card">
           <span className="stat-icon purple"><Trophy /></span>
@@ -622,6 +726,25 @@ function InsightsView({ data }: { data: AppData }) {
         </div>
       )}
     </section>
+  )
+}
+
+function AnalysisView({ data, onSelectDay }: { data: AppData; onSelectDay: (date: string) => void }) {
+  const [period, setPeriod] = useState<Period>('month')
+  const [anchor, setAnchor] = useState(new Date())
+
+  return (
+    <div className="analysis-combined" aria-label="Analyse">
+      <HistoryView
+        data={data}
+        onSelectDay={onSelectDay}
+        period={period}
+        anchor={anchor}
+        onPeriodChange={setPeriod}
+        onAnchorChange={setAnchor}
+      />
+      <InsightsView data={data} period={period} anchor={anchor} />
+    </div>
   )
 }
 
@@ -709,8 +832,6 @@ function GoalForm({
             <input
               autoFocus
               required
-              pattern=".*\\S.*"
-              title="Bitte einen Namen eingeben."
               maxLength={40}
               value={value.name}
               onChange={(event) => setValue({ ...value, name: event.target.value })}
@@ -736,8 +857,6 @@ function GoalForm({
               <input
                 required
                 maxLength={8}
-                pattern=".*\\S.*"
-                title="Bitte eine Einheit eingeben."
                 value={value.unit}
                 onChange={(event) => setValue({ ...value, unit: event.target.value })}
                 placeholder="Stk."
@@ -919,40 +1038,108 @@ function metricTrend(metrics: BodyMetric[], key: 'weightKg' | 'muscleMassKg') {
 function BodyView({
   data,
   onChange,
+  allowIntegration = true,
 }: {
   data: AppData
   onChange: (data: AppData) => void
+  allowIntegration?: boolean
 }) {
   const [date, setDate] = useState(todayKey())
   const [weight, setWeight] = useState('')
   const [muscle, setMuscle] = useState('')
-  const metrics = [...data.bodyMetrics].sort((a, b) => b.date.localeCompare(a.date))
+  const [editingMetricId, setEditingMetricId] = useState<string | null>(null)
+  const [integration, setIntegration] = useState<GoogleHealthStatus | null>(null)
+  const [syncing, setSyncing] = useState(false)
+  const metrics = sortBodyMetricsNewestFirst(data.bodyMetrics)
   const latestWeight = metrics.find((metric) => metric.weightKg !== undefined)?.weightKg
   const weightTrend = metricTrend(metrics, 'weightKg')
   const muscleTrend = metricTrend(metrics, 'muscleMassKg')
 
+  useEffect(() => {
+    if (!allowIntegration) return
+    api.googleHealthStatus().then(setIntegration).catch(() => setIntegration(null))
+  }, [allowIntegration])
+
+  const disconnect = async () => {
+    if (!window.confirm('Google Health wirklich trennen? Bereits importierte Messungen bleiben erhalten.')) return
+    try {
+      await api.disconnectGoogleHealth()
+      setIntegration(await api.googleHealthStatus())
+    } catch (error) {
+      setIntegration((current) => current ? { ...current, lastSyncError: error instanceof Error ? error.message : 'Trennen fehlgeschlagen.' } : current)
+    }
+  }
+
   const submit = (event: FormEvent) => {
     event.preventDefault()
     if (!weight && !muscle) return
-    const existing = data.bodyMetrics.find((metric) => metric.date === date)
+    const existing = editingMetricId
+      ? data.bodyMetrics.find((metric) => metric.id === editingMetricId)
+      : undefined
     const metric: BodyMetric = {
+      ...existing,
       id: existing?.id ?? makeId('body'),
       date,
       weightKg: weight ? Number(weight.replace(',', '.')) : existing?.weightKg,
       muscleMassKg: muscle ? Number(muscle.replace(',', '.')) : existing?.muscleMassKg,
+      source: existing?.source === 'google-health' ? 'mixed' : (existing?.source ?? 'manual'),
+      measuredAt: existing?.measuredAt,
       createdAt: existing?.createdAt ?? new Date().toISOString(),
     }
     onChange({
       ...data,
-      bodyMetrics: [...data.bodyMetrics.filter((item) => item.date !== date), metric],
+      bodyMetrics: existing
+        ? data.bodyMetrics.map((item) => item.id === existing.id ? metric : item)
+        : [...data.bodyMetrics, metric],
     })
     setWeight('')
     setMuscle('')
+    setEditingMetricId(null)
   }
 
   return (
     <section className="view">
       <PageIntro eyebrow="Dein Fortschritt" title="Körper" />
+      {integration && (
+        <div className="info-banner integration-banner">
+          <CircleGauge aria-hidden="true" />
+          <p>
+            <strong>Google Health</strong>
+            <span>
+              {!integration.configured
+                ? 'Auf dem Server noch nicht konfiguriert.'
+                : integration.connected
+                  ? `Verbunden · Sync alle ${integration.pollingMinutes} Min.`
+                  : 'Bereit zum Verbinden.'}
+            </span>
+            {integration.lastSyncAt && <small>Letzter Sync: {new Date(integration.lastSyncAt).toLocaleString('de-DE')}</small>}
+            {integration.lastSyncError && <small className="integration-error">{integration.lastSyncError}</small>}
+          </p>
+          {integration.configured && !integration.connected && (
+            <a className="outline-button" href="/api/integrations/google-health/connect">Verbinden</a>
+          )}
+          {integration.connected && (
+            <div className="integration-actions">
+              <button
+                type="button"
+                className="outline-button"
+                disabled={syncing}
+                onClick={async () => {
+                  setSyncing(true)
+                  try {
+                    await api.syncGoogleHealth()
+                    window.location.reload()
+                  } catch (error) {
+                    setIntegration((current) => current ? { ...current, lastSyncError: error instanceof Error ? error.message : 'Sync fehlgeschlagen.' } : current)
+                  } finally { setSyncing(false) }
+                }}
+              >{syncing ? 'Synchronisiert …' : 'Jetzt synchronisieren'}</button>
+              <a href="/api/integrations/google-health/connect">Neu verbinden</a>
+              <button type="button" className="link-button danger" onClick={() => void disconnect()}>Trennen</button>
+            </div>
+          )}
+        </div>
+      )}
       <article className="body-hero">
         <Scale aria-hidden="true" />
         <div><p>Letztes Gewicht</p><h2>{latestWeight ? `${latestWeight.toLocaleString('de-DE')} kg` : 'Noch offen'}</h2></div>
@@ -964,10 +1151,18 @@ function BodyView({
         )}
       </article>
       <form className="metric-form" onSubmit={submit}>
-        <div className="section-title"><div><p>Messung</p><h2>Werte eintragen</h2></div><Dumbbell /></div>
+        <div className="section-title">
+          <div>
+            <p>{editingMetricId ? 'Ausgewählte Messung' : 'Neue Messung'}</p>
+            <h2>{editingMetricId ? 'Werte ergänzen' : 'Werte eintragen'}</h2>
+          </div>
+          {editingMetricId ? (
+            <button type="button" className="mini-action" aria-label="Auswahl aufheben" onClick={() => setEditingMetricId(null)}><X /></button>
+          ) : <Dumbbell />}
+        </div>
         <label>
           <span>Datum</span>
-          <input type="date" required value={date} onChange={(event) => setDate(event.target.value)} />
+          <input type="date" required max={todayKey()} value={date} onChange={(event) => setDate(event.target.value)} />
         </label>
         <div className="form-row">
           <label>
@@ -997,22 +1192,40 @@ function BodyView({
         {metrics.slice(0, 8).map((metric) => (
           <article key={metric.id}>
             <time dateTime={metric.date}>{formatShortDate(metric.date)}</time>
-            <span>{metric.weightKg ? `${metric.weightKg.toLocaleString('de-DE')} kg` : '–'}</span>
-            <span>{metric.muscleMassKg ? `${metric.muscleMassKg.toLocaleString('de-DE')} kg Muskel` : '–'}</span>
-            <button
-              type="button"
-              className="mini-action danger"
-              aria-label={`Messung vom ${formatShortDate(metric.date)} löschen`}
-              onClick={() => {
-                if (!window.confirm(`Messung vom ${formatShortDate(metric.date)} wirklich löschen?`)) return
-                onChange({
-                  ...data,
-                  bodyMetrics: data.bodyMetrics.filter((item) => item.id !== metric.id),
-                })
-              }}
-            >
-              <Trash2 />
-            </button>
+            <div className="metric-values">
+              <span>{metric.weightKg ? `${metric.weightKg.toLocaleString('de-DE')} kg` : '–'}</span>
+              <span>{metric.muscleMassKg ? `${metric.muscleMassKg.toLocaleString('de-DE')} kg Muskel` : '–'}</span>
+              {metric.bodyFatPercent !== undefined && <small>{metric.bodyFatPercent.toLocaleString('de-DE')} % Fett</small>}
+            </div>
+            <div className="metric-actions">
+              <button
+                type="button"
+                className="mini-action"
+                aria-label={`${metric.weightKg?.toLocaleString('de-DE') ?? 'Messung'} vom ${formatShortDate(metric.date)} ergänzen`}
+                onClick={() => {
+                  setEditingMetricId(metric.id)
+                  setDate(metric.date)
+                  setWeight('')
+                  setMuscle('')
+                }}
+              >
+                <Pencil />
+              </button>
+              <button
+                type="button"
+                className="mini-action danger"
+                aria-label={`${metric.weightKg?.toLocaleString('de-DE') ?? 'Messung'} vom ${formatShortDate(metric.date)} löschen`}
+                onClick={() => {
+                  if (!window.confirm(`Messung vom ${formatShortDate(metric.date)} wirklich löschen?`)) return
+                  onChange({
+                    ...data,
+                    bodyMetrics: data.bodyMetrics.filter((item) => item.id !== metric.id),
+                  })
+                }}
+              >
+                <Trash2 />
+              </button>
+            </div>
           </article>
         ))}
         {metrics.length === 0 && <p className="quiet-copy">Noch keine Messungen gespeichert.</p>}
@@ -1024,7 +1237,7 @@ function BodyView({
 
 const navItems: { id: Tab; label: string; icon: typeof Activity }[] = [
   { id: 'today', label: 'Heute', icon: Target },
-  { id: 'history', label: 'Verlauf', icon: CalendarDays },
+  { id: 'gym', label: 'GYM', icon: Dumbbell },
   { id: 'insights', label: 'Analyse', icon: BarChart3 },
   { id: 'goals', label: 'Ziele', icon: Settings2 },
   { id: 'body', label: 'Körper', icon: Scale },
@@ -1034,20 +1247,151 @@ function App() {
   const [isDemo] = useState(
     () => new URLSearchParams(window.location.search).get('demo') === '1',
   )
-  const [data, setData] = useState<AppData>(() => (isDemo ? createDemoData() : loadData()))
+  const preferenceKey = isDemo ? DEMO_PROFILE_STORAGE_KEY : PROFILE_STORAGE_KEY
+  const [activeProfileId, setActiveProfileId] = useState<ProfileId>(() => storedProfile(preferenceKey))
+  const [profiles, setProfiles] = useState<Profile[]>(BUILTIN_PROFILES)
+  const [initialPendingMutations] = useState<PendingMutation[]>(() => isDemo ? [] : loadPendingMutations())
+  const [initialDemoData] = useState<Record<ProfileId, AppData>>(() => ({ 'profile-bugra': createDemoData(), 'profile-sena': emptyData() }))
+  const demoDataRef = useRef(initialDemoData)
+  const [data, setData] = useState<AppData | null>(() => isDemo ? initialDemoData[activeProfileId] : null)
+  const [serverError, setServerError] = useState<string | null>(null)
+  const [pendingMutationCount, setPendingMutationCount] = useState(initialPendingMutations.length)
+  const [googleHealthEnabled, setGoogleHealthEnabled] = useState(false)
+  const revisionRef = useRef(0)
+  const pendingMutationsRef = useRef<PendingMutation[]>(initialPendingMutations)
+  const activeProfileRef = useRef(activeProfileId)
+  const loadSequenceRef = useRef(0)
+  const processingMutationsRef = useRef(false)
+  const processMutationsRef = useRef<() => void>(() => undefined)
   const [tab, setTab] = useState<Tab>('today')
+  const [gymEditorDirty, setGymEditorDirty] = useState(false)
   const [selectedDate, setSelectedDate] = useState(todayKey())
 
+  const processMutations = useCallback(async () => {
+    if (processingMutationsRef.current || isDemo) return
+    processingMutationsRef.current = true
+    let failed = false
+    let rejectedMessage: string | null = null
+    try {
+      while (pendingMutationsRef.current.length) {
+        const queued = pendingMutationsRef.current[0]!
+        let saved = false
+        let lastError: unknown
+        for (let attempt = 0; attempt < 3 && !saved; attempt++) {
+          try {
+            const envelope = await api.mutate(queued.profileId, queued.mutation)
+            revisionRef.current = Math.max(revisionRef.current, envelope.revision)
+            saved = true
+          } catch (error) {
+            lastError = error
+            if (isPermanentMutationError(error)) break
+            if (attempt < 2) await new Promise((resolve) => window.setTimeout(resolve, 300 * (attempt + 1)))
+          }
+        }
+        if (!saved && isPermanentMutationError(lastError)) {
+          pendingMutationsRef.current.shift()
+          persistPendingMutations(pendingMutationsRef.current)
+          setPendingMutationCount(pendingMutationsRef.current.length)
+          rejectedMessage = `Speichern abgelehnt: ${lastError.message} Die Änderung wurde zurückgesetzt.`
+          continue
+        }
+        if (!saved) throw lastError
+        pendingMutationsRef.current.shift()
+        persistPendingMutations(pendingMutationsRef.current)
+        setPendingMutationCount(pendingMutationsRef.current.length)
+      }
+      const requestedProfile = activeProfileRef.current
+      const envelope = await api.load(requestedProfile)
+      if (requestedProfile === activeProfileRef.current && envelope.revision >= revisionRef.current) {
+        revisionRef.current = envelope.revision
+        setData(applyPendingMutations(envelope.data, pendingMutationsRef.current, requestedProfile))
+      }
+      setServerError(rejectedMessage)
+    } catch (error) {
+      failed = true
+      setServerError(`${error instanceof Error ? error.message : 'Speichern fehlgeschlagen.'}${pendingMutationsRef.current.length ? ' Deine Änderung bleibt vorgemerkt.' : ''}`)
+    } finally {
+      processingMutationsRef.current = false
+      if (!failed && pendingMutationsRef.current.length) processMutationsRef.current()
+    }
+  }, [isDemo])
+
   useEffect(() => {
-    if (!isDemo) saveData(data)
-  }, [data, isDemo])
+    processMutationsRef.current = () => { void processMutations() }
+  }, [processMutations])
+
+  useEffect(() => {
+    activeProfileRef.current = activeProfileId
+    try { localStorage.setItem(preferenceKey, activeProfileId) } catch { /* preference is optional */ }
+  }, [activeProfileId, preferenceKey])
+
+  useEffect(() => {
+    if (isDemo) return
+    const sequence = ++loadSequenceRef.current
+    const load = async () => {
+      try {
+        let envelope = await api.load(activeProfileId)
+        const localRaw = localStorage.getItem(STORAGE_KEY)
+        const alreadyHandled = localStorage.getItem('pace-server-import-v1')
+        if (activeProfileId === DEFAULT_PROFILE_ID && localRaw && !alreadyHandled) {
+          const local = loadData()
+          const wantsImport = window.confirm('Auf diesem Gerät wurden lokale Pace-Daten gefunden. Sollen sie einmalig sicher auf den Server übertragen werden? Die lokale Kopie bleibt als Backup erhalten.')
+          if (wantsImport) {
+            try {
+              envelope = await api.importLocal(DEFAULT_PROFILE_ID, local)
+              localStorage.setItem(`pace-local-backup-${new Date().toISOString()}`, localRaw)
+              localStorage.setItem('pace-server-import-v1', 'imported')
+            } catch (error) {
+              if (error instanceof ApiError && error.status === 409) localStorage.setItem('pace-server-import-v1', 'skipped-conflict')
+              setServerError(error instanceof Error ? error.message : 'Lokaler Import fehlgeschlagen.')
+            }
+          } else {
+            localStorage.setItem('pace-server-import-v1', 'declined')
+          }
+        }
+        if (sequence === loadSequenceRef.current && activeProfileId === activeProfileRef.current) {
+          if (envelope.revision < revisionRef.current) return
+          revisionRef.current = envelope.revision
+          setGoogleHealthEnabled(Boolean(envelope.features?.googleHealth))
+          if (Array.isArray(envelope.profiles) && envelope.profiles.length) setProfiles(envelope.profiles)
+          setData(applyPendingMutations(envelope.data, pendingMutationsRef.current, activeProfileId))
+          if (pendingMutationsRef.current.length) processMutationsRef.current()
+        }
+      } catch (error) {
+        if (sequence === loadSequenceRef.current) setServerError(error instanceof Error ? error.message : 'Pace-Server nicht erreichbar.')
+      }
+    }
+    load()
+  }, [activeProfileId, isDemo])
+
+  const commitData = (next: AppData) => {
+    if (!data) return false
+    if (isDemo) {
+      demoDataRef.current[activeProfileId] = next
+      setData(next)
+      return true
+    }
+    const mutation = deriveMutation(data, next)
+    if (!mutation) {
+      setServerError('Diese Änderung konnte nicht eindeutig gespeichert werden. Es wurden keine Serverdaten verändert.')
+      return false
+    }
+    pendingMutationsRef.current.push({ profileId: activeProfileId, mutation })
+    if (!persistPendingMutations(pendingMutationsRef.current)) {
+      pendingMutationsRef.current.pop()
+      setServerError('Die Änderung konnte auf diesem Gerät nicht sicher vorgemerkt werden. Bitte prüfe den Browserspeicher und versuche es erneut.')
+      return false
+    }
+    setPendingMutationCount(pendingMutationsRef.current.length)
+    setData(next)
+    void processMutations()
+    return true
+  }
 
   const updateStatus = (goalId: string, status: GoalStatus) => {
     if (selectedDate > todayKey()) return
-    setData((current) => ({
-      ...current,
-      entries: setEntryStatus(current.entries, goalId, selectedDate, status),
-    }))
+    if (!data) return
+    commitData({ ...data, entries: setEntryStatus(data.entries, goalId, selectedDate, status) })
   }
 
   const openDay = (date: string) => {
@@ -1055,10 +1399,44 @@ function App() {
     setTab('today')
   }
 
+  const changeTab = (next: Tab) => {
+    if (next === tab) return
+    if (gymEditorDirty && tab === 'gym' && !window.confirm('Ungespeicherte Änderungen am Trainingsplan verwerfen?')) return
+    setGymEditorDirty(false)
+    setTab(next)
+  }
+
+  const changeProfile = (next: ProfileId) => {
+    if (next === activeProfileId) return
+    if (gymEditorDirty && !window.confirm('Ungespeicherte Änderungen am Trainingsplan verwerfen und Profil wechseln?')) return
+    setGymEditorDirty(false)
+    setSelectedDate(todayKey())
+    setTab('today')
+    setServerError(null)
+    activeProfileRef.current = next
+    setActiveProfileId(next)
+    if (isDemo) setData(demoDataRef.current[next])
+    else setData(null)
+  }
+
+  if (!data) {
+    return (
+      <div className="app-shell server-state">
+        <Brand />
+        {serverError ? (
+          <><h1>Pace ist nicht erreichbar</h1><p>{serverError}</p><button className="primary-button" onClick={() => window.location.reload()}>Erneut versuchen</button></>
+        ) : <><span className="loading-pulse" /><p>Daten werden geladen …</p></>}
+      </div>
+    )
+  }
+
+  const activeProfile = profiles.find((profile) => profile.id === activeProfileId) ?? BUILTIN_PROFILES.find((profile) => profile.id === activeProfileId)!
+
   return (
     <div className="app-shell">
       <aside className="desktop-rail">
         <Brand />
+        <ProfileSwitcher profile={activeProfile} profiles={profiles} onSelect={changeProfile} />
         <nav aria-label="Hauptnavigation">
           {navItems.map((item) => {
             const Icon = item.icon
@@ -1067,7 +1445,7 @@ function App() {
                 type="button"
                 className={tab === item.id ? 'active' : ''}
                 aria-current={tab === item.id ? 'page' : undefined}
-                onClick={() => setTab(item.id)}
+                onClick={() => changeTab(item.id)}
                 key={item.id}
               >
                 <Icon aria-hidden="true" /><span>{item.label}</span>
@@ -1078,23 +1456,24 @@ function App() {
         <div className="rail-quote"><Medal /><p>Konstanz schlägt Perfektion.</p></div>
       </aside>
       <main>
-        <div className="mobile-brand"><Brand /><span>{format(new Date(), 'd. MMM', { locale: de })}</span></div>
+        <div className="mobile-brand"><Brand /><ProfileSwitcher profile={activeProfile} profiles={profiles} onSelect={changeProfile} /></div>
         <div className="content">
           {isDemo && <DemoBanner />}
+          {serverError && !isDemo && <aside className="error-banner" role="alert">{serverError}<button type="button" onClick={() => pendingMutationCount ? void processMutations() : window.location.reload()}>{pendingMutationCount ? 'Erneut speichern' : 'Neu laden'}</button></aside>}
           {tab === 'today' && (
-            <TodayView data={data} selectedDate={selectedDate} onDate={setSelectedDate} onStatus={updateStatus} onOpenGoals={() => setTab('goals')} />
+            <TodayView data={data} selectedDate={selectedDate} onDate={setSelectedDate} onStatus={updateStatus} onOpenGoals={() => changeTab('goals')} />
           )}
-          {tab === 'history' && <HistoryView data={data} onSelectDay={openDay} />}
-          {tab === 'insights' && <InsightsView data={data} />}
-          {tab === 'goals' && <GoalsView data={data} onChange={setData} />}
-          {tab === 'body' && <BodyView data={data} onChange={setData} />}
+          {tab === 'gym' && <GymView key={activeProfileId} data={data} onChange={commitData} draftStorageKey={isDemo ? `pace-gym-demo-draft-v2-${activeProfileId}` : activeProfileId === DEFAULT_PROFILE_ID ? 'pace-gym-active-draft-v1' : `pace-gym-active-draft-v2-${activeProfileId}`} onEditorDirtyChange={setGymEditorDirty} />}
+          {tab === 'insights' && <AnalysisView data={data} onSelectDay={openDay} />}
+          {tab === 'goals' && <GoalsView data={data} onChange={commitData} />}
+          {tab === 'body' && <BodyView data={data} onChange={commitData} allowIntegration={googleHealthEnabled && !isDemo} />}
         </div>
       </main>
       <nav className="bottom-nav" aria-label="Hauptnavigation">
         {navItems.map((item) => {
           const Icon = item.icon
           return (
-            <button type="button" className={tab === item.id ? 'active' : ''} aria-current={tab === item.id ? 'page' : undefined} onClick={() => setTab(item.id)} key={item.id}>
+            <button type="button" className={tab === item.id ? 'active' : ''} aria-current={tab === item.id ? 'page' : undefined} onClick={() => changeTab(item.id)} key={item.id}>
               <Icon aria-hidden="true" /><span>{item.label}</span>
             </button>
           )
@@ -1105,3 +1484,40 @@ function App() {
 }
 
 export default App
+
+function mutationId() {
+  return `mutation-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`
+}
+
+function isPermanentMutationError(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.status >= 400 && error.status < 500 && ![409, 429].includes(error.status)
+}
+
+function deriveMutation(current: AppData, next: AppData): DataMutation | null {
+  const removedTemplate = current.gymTemplates.find((template) => !next.gymTemplates.some((item) => item.id === template.id))
+  if (removedTemplate) return { id: mutationId(), kind: 'gym.template.delete', templateId: removedTemplate.id }
+  const changedTemplate = next.gymTemplates.find((template) => JSON.stringify(template) !== JSON.stringify(current.gymTemplates.find((item) => item.id === template.id)))
+  if (changedTemplate) return { id: mutationId(), kind: 'gym.template.upsert', template: changedTemplate }
+  const removedSession = current.gymSessions.find((session) => !next.gymSessions.some((item) => item.id === session.id))
+  if (removedSession) return { id: mutationId(), kind: 'gym.session.delete', sessionId: removedSession.id }
+  const completedSession = next.gymSessions.find((session) => !current.gymSessions.some((item) => item.id === session.id))
+  if (completedSession) return { id: mutationId(), kind: 'gym.session.complete', session: completedSession }
+  const removedGoal = current.goals.find((goal) => !next.goals.some((item) => item.id === goal.id))
+  if (removedGoal) return { id: mutationId(), kind: 'goal.delete', goalId: removedGoal.id }
+  const changedGoal = next.goals.find((goal) => JSON.stringify(goal) !== JSON.stringify(current.goals.find((item) => item.id === goal.id)))
+  if (changedGoal) return { id: mutationId(), kind: 'goal.upsert', goal: changedGoal }
+  const removedMetric = current.bodyMetrics.find((metric) => !next.bodyMetrics.some((item) => item.id === metric.id))
+  if (removedMetric) return { id: mutationId(), kind: 'body.delete', metricId: removedMetric.id }
+  const changedMetric = next.bodyMetrics.find((metric) => JSON.stringify(metric) !== JSON.stringify(current.bodyMetrics.find((item) => item.id === metric.id)))
+  if (changedMetric) return { id: mutationId(), kind: 'body.upsert', metric: changedMetric }
+  const keys = new Set([...current.entries, ...next.entries].map((entry) => `${entry.goalId}\0${entry.date}`))
+  for (const key of keys) {
+    const [goalId, date] = key.split('\0')
+    const before = current.entries.find((entry) => entry.goalId === goalId && entry.date === date)
+    const after = next.entries.find((entry) => entry.goalId === goalId && entry.date === date)
+    if (JSON.stringify(before) !== JSON.stringify(after)) {
+      return { id: mutationId(), kind: 'entry.set', entry: after ?? { goalId, date, status: 'open', updatedAt: new Date().toISOString() } }
+    }
+  }
+  return null
+}
