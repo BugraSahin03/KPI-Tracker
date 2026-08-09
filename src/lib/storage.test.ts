@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createInitialData, loadData, saveData, setEntryStatus, STORAGE_KEY } from './storage'
+import { createInitialData, isAppData, isBodyMetric, loadData, saveData, setEntryStatus, STORAGE_KEY } from './storage'
 
 function memoryStorage(initial?: string) {
   let value = initial ?? null
@@ -17,7 +17,8 @@ describe('Storage-Layer', () => {
     const storage = memoryStorage()
     const data = loadData(storage)
     expect(data.goals.map((goal) => goal.name)).toEqual(['Protein', 'Wasser'])
-    expect(data.version).toBe(2)
+    expect(data.version).toBe(3)
+    expect(data.gymTemplates.map((template) => template.name)).toEqual(['Push', 'Pull', 'Beine'])
     expect(data.goals[0].activityPeriods).toHaveLength(1)
   })
 
@@ -68,10 +69,20 @@ describe('Storage-Layer', () => {
     }
 
     const migrated = loadData(memoryStorage(JSON.stringify(legacy)))
-    expect(migrated.version).toBe(2)
+    expect(migrated.version).toBe(3)
     expect(migrated.goals[0].createdAt).toBe('2026-07-28')
     expect(migrated.goals[0].activityPeriods).toEqual([{ start: '2026-07-28' }])
     expect(migrated.entries).toHaveLength(1)
+  })
+
+  it('migriert gültige Version-2-Daten ohne Verlust und ergänzt GYM', () => {
+    const current = createInitialData('2026-08-01')
+    current.bodyMetrics.push({ id: 'body-old', date: '2026-08-01', weightKg: 80, createdAt: '2026-08-01T08:00:00Z' })
+    const legacyV2 = { version: 2, goals: current.goals, entries: current.entries, bodyMetrics: current.bodyMetrics }
+    const migrated = loadData(memoryStorage(JSON.stringify(legacyV2)))
+    expect(migrated.version).toBe(3)
+    expect(migrated.bodyMetrics).toEqual(current.bodyMetrics)
+    expect(migrated.gymTemplates.map((template) => template.name)).toEqual(['Push', 'Pull', 'Beine'])
   })
 
   it('verwirft strukturell ungültige gespeicherte Daten ohne Laufzeitfehler', () => {
@@ -85,5 +96,28 @@ describe('Storage-Layer', () => {
       'Protein',
       'Wasser',
     ])
+  })
+
+  it('weist doppelte IDs, Einträge und verwaiste Referenzen zurück', () => {
+    const duplicateGoals = createInitialData('2026-08-01')
+    duplicateGoals.goals.push({ ...duplicateGoals.goals[0]! })
+    expect(isAppData(duplicateGoals)).toBe(false)
+
+    const duplicateEntries = createInitialData('2026-08-01')
+    const entry = { goalId: 'protein', date: '2026-08-01', status: 'done' as const, updatedAt: '2026-08-01T12:00:00Z' }
+    duplicateEntries.entries.push(entry, { ...entry })
+    expect(isAppData(duplicateEntries)).toBe(false)
+
+    const orphan = createInitialData('2026-08-01')
+    orphan.entries.push({ ...entry, goalId: 'missing' })
+    expect(isAppData(orphan)).toBe(false)
+  })
+
+  it('akzeptiert nur kanonische gültige ISO-Zeitstempel mit Zeitzone', () => {
+    const base = { id: 'metric', date: '2026-08-01', weightKg: 80, createdAt: '2026-08-01T08:00:00Z' }
+    expect(isBodyMetric({ ...base, measuredAt: '2026-08-01T09:00:00+02:00' })).toBe(true)
+    expect(isBodyMetric({ ...base, measuredAt: '2026-08-01T09:00:00.123456789+02:00' })).toBe(true)
+    expect(isBodyMetric({ ...base, measuredAt: '2026-08-01 09:00:00' })).toBe(false)
+    expect(isBodyMetric({ ...base, measuredAt: '2026-02-30T09:00:00Z' })).toBe(false)
   })
 })

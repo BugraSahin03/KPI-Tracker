@@ -13,7 +13,7 @@ import {
   startOfYear,
 } from 'date-fns'
 import { de } from 'date-fns/locale'
-import type { Period } from '../types'
+import type { Period } from '../types.js'
 
 export const toDateKey = (date: Date) => format(date, 'yyyy-MM-dd')
 export const fromDateKey = (key: string) => parseISO(key)
@@ -53,7 +53,7 @@ export function periodBounds(period: Period, anchor: Date, capAtToday = false) {
         ? endOfMonth(anchor)
         : endOfYear(anchor)
   const now = new Date()
-  if (capAtToday && start <= now && end > now) end = now
+  if (capAtToday && end > now) end = now
   return { start, end }
 }
 

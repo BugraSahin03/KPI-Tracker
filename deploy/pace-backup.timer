@@ -1,0 +1,11 @@
+[Unit]
+Description=Tägliches Pace SQLite-Backup
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 Europe/Berlin
+Persistent=true
+RandomizedDelaySec=5m
+Unit=pace-backup.service
+
+[Install]
+WantedBy=timers.target
