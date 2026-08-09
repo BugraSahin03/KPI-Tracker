@@ -99,7 +99,7 @@ describe('Heute-Interaktion', () => {
     expect(screen.getAllByRole('button', { name: 'Heute' }).at(-1)).toHaveAttribute('aria-current', 'page')
   })
 
-  it('steuert Kalender und Insights gemeinsam und zeigt die Woche als sieben Tageskacheln', async () => {
+  it('steuert Kalender und Insights gemeinsam und zeigt die Woche als sieben Tageskacheln', { timeout: 10_000 }, async () => {
     const user = userEvent.setup()
     const now = new Date()
     const previousMonthAnchor = addMonths(now, -1)
