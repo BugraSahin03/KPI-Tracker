@@ -1997,8 +1997,11 @@ fieldset legend {
 .gym-start-actions .link-button:hover { color: var(--text); background: rgba(255, 255, 255, .035); }
 .gym-start-actions svg { width: 17px; }
 
-.gym-template-modal { max-height: min(92dvh, 820px); overflow-y: auto; }
-.gym-template-form { display: grid; gap: 14px; }
+.gym-template-backdrop { position: fixed; inset: 0; align-items: center; overflow: hidden; padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+.gym-template-modal { width: min(100%, 560px); max-width: 100%; max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); padding: 0; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line); border-radius: 24px; }
+.gym-template-modal .modal-head { flex: 0 0 auto; margin: 0; padding: 20px 18px 14px; border-bottom: 1px solid var(--line); background: #101316; }
+.gym-template-form { min-height: 0; padding: 16px 18px max(18px, env(safe-area-inset-bottom)); display: grid; gap: 14px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.gym-template-save { position: sticky; z-index: 2; bottom: 0; margin-top: 2px; box-shadow: 0 -12px 24px #101316; }
 .gym-form-error { color: #ff8ca3; font-size: .7rem; line-height: 1.4; }
 .gym-form-heading { display: flex; align-items: center; justify-content: space-between; font-size: .75rem; }
 .gym-form-heading span { color: var(--muted); }
@@ -2013,6 +2016,8 @@ fieldset legend {
 .gym-name-field { display: block; margin: 2px 94px 10px 0; }
 
 @media (min-width: 720px) {
+  .gym-template-backdrop { padding: 24px; }
+  .gym-template-modal { max-height: min(calc(100dvh - 48px), 860px); }
   .gym-split-grid { gap: 13px; }
   .gym-split-start { min-height: 150px; }
 }

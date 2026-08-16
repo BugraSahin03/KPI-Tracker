@@ -1,5 +1,6 @@
 import { ArrowLeft, ArrowRight, Check, ChevronDown, ChevronUp, Dumbbell, Eye, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { formatShortDate, todayKey } from './lib/date'
 import { formatDecimalInput, parseDecimalInput } from './lib/decimal'
 import { isGymSession, legacyGymSetId, makeId } from './lib/storage'
@@ -91,6 +92,27 @@ function TemplateEditor({ template, onSave, onCancel, onDirtyChange }: {
     return () => returnFocus?.focus()
   }, [])
 
+  useEffect(() => {
+    const scrollY = window.scrollY
+    const previous = {
+      overflow: document.body.style.overflow,
+      position: document.body.style.position,
+      top: document.body.style.top,
+      width: document.body.style.width,
+    }
+    document.body.style.overflow = 'hidden'
+    document.body.style.position = 'fixed'
+    document.body.style.top = `-${scrollY}px`
+    document.body.style.width = '100%'
+    return () => {
+      document.body.style.overflow = previous.overflow
+      document.body.style.position = previous.position
+      document.body.style.top = previous.top
+      document.body.style.width = previous.width
+      if (scrollY > 0) window.scrollTo(0, scrollY)
+    }
+  }, [])
+
   const submit = (event: FormEvent) => {
     event.preventDefault()
     if (exercises.some((exercise) => exercise.weight !== '' && parseDecimalInput(exercise.weight) === undefined)) {
@@ -133,14 +155,14 @@ function TemplateEditor({ template, onSave, onCancel, onDirtyChange }: {
     setExercises(next)
   }
 
-  return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && requestClose()}>
+  return createPortal(
+    <div className="modal-backdrop gym-template-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && requestClose()}>
       <section ref={dialogRef} className="modal-sheet gym-template-modal" role="dialog" aria-modal="true" aria-labelledby="gym-template-title" onMouseDown={(event) => event.stopPropagation()}>
         <div className="modal-head">
           <div><p className="eyebrow">Trainingsplan</p><h2 id="gym-template-title">{template ? 'Einheit bearbeiten' : 'Einheit anlegen'}</h2></div>
           <button type="button" className="mini-action" onClick={requestClose} aria-label="Schließen"><X /></button>
         </div>
-        <form className="gym-template-form" onSubmit={submit}>
+        <form className="gym-template-form gym-template-scroll" onSubmit={submit}>
           <label><span>Name der Einheit</span><input required maxLength={50} value={name} onChange={(event) => setName(event.target.value)} placeholder="z. B. Oberkörper" autoFocus /></label>
           <div className="gym-form-heading"><strong>Übungen</strong><span>{exercises.length}/30</span></div>
           <div className="gym-exercise-builder">
@@ -163,10 +185,11 @@ function TemplateEditor({ template, onSave, onCancel, onDirtyChange }: {
           </div>
           <button type="button" className="outline-button full" disabled={exercises.length >= 30} onClick={() => setExercises([...exercises, exerciseDraft()])}><Plus /> Übung hinzufügen</button>
           {formError && <p className="gym-form-error" role="alert">{formError}</p>}
-          <button type="submit" className="primary-button full"><Check /> Einheit speichern</button>
+          <button type="submit" className="primary-button full gym-template-save"><Check /> Einheit speichern</button>
         </form>
       </section>
-    </div>
+    </div>,
+    document.body,
   )
 }
 

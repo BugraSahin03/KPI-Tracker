@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useState } from 'react'
 import GymView from './GymView'
+import './App.css'
 import { todayKey } from './lib/date'
 import { createInitialData, legacyGymSetId } from './lib/storage'
 import type { AppData, GymSession } from './types'
@@ -125,6 +126,61 @@ describe('GYM-Workflow', () => {
     expect(screen.queryByRole('button', { name: 'Core bearbeiten' })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Zurück zu GYM' }))
     expect(screen.getByRole('button', { name: 'Push starten' })).toBeInTheDocument()
+  })
+
+  it('portaliert einen langen Einheiten-Editor viewportfest mit interner Scrollfläche und räumt Body-Lock beim Unmount auf', async () => {
+    const user = userEvent.setup()
+    const data = withPushExercise()
+    data.gymTemplates[0]!.exercises = Array.from({ length: 20 }, (_, index) => ({
+      id: `exercise-${index}`, name: `Übung ${index + 1}`, sets: 3, targetWeightKg: 20 + index, targetReps: 10, position: index,
+    }))
+    const rendered = render(<Harness initial={data} />)
+    await user.click(screen.getByRole('button', { name: 'Einheiten verwalten' }))
+    await user.click(screen.getByRole('button', { name: 'Push bearbeiten' }))
+
+    const dialog = screen.getByRole('dialog', { name: 'Einheit bearbeiten' })
+    const backdrop = dialog.parentElement!
+    const form = within(dialog).getByRole('button', { name: 'Einheit speichern' }).closest('form')!
+    expect(backdrop).toHaveClass('modal-backdrop', 'gym-template-backdrop')
+    expect(backdrop.parentElement).toBe(document.body)
+    expect(dialog.closest('.view')).toBeNull()
+    expect(dialog).toHaveClass('gym-template-modal')
+    expect(form).toHaveClass('gym-template-scroll')
+    expect(dialog.querySelectorAll('.gym-builder-card')).toHaveLength(20)
+    expect(getComputedStyle(backdrop).position).toBe('fixed')
+    expect(getComputedStyle(dialog).overflow).toBe('hidden')
+    expect(getComputedStyle(form).overflowY).toBe('auto')
+    expect(getComputedStyle(within(dialog).getByRole('button', { name: 'Einheit speichern' })).position).toBe('sticky')
+    expect(document.body.style.overflow).toBe('hidden')
+    expect(document.body.style.position).toBe('fixed')
+    expect(screen.getByRole('textbox', { name: 'Name der Einheit' })).toHaveFocus()
+
+    rendered.unmount()
+    expect(screen.queryByRole('dialog', { name: 'Einheit bearbeiten' })).not.toBeInTheDocument()
+    expect(document.body.style.overflow).toBe('')
+    expect(document.body.style.position).toBe('')
+  })
+
+  it('behält Dirty-Bestätigung, Escape und Fokus-Rückgabe im portalierten Editor bei und löst Body-Lock sauber', async () => {
+    const user = userEvent.setup()
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    render(<Harness initial={withPushExercise()} />)
+    await user.click(screen.getByRole('button', { name: 'Einheiten verwalten' }))
+    const trigger = screen.getByRole('button', { name: 'Push bearbeiten' })
+    await user.click(trigger)
+    const name = screen.getByRole('textbox', { name: 'Name der Einheit' })
+    await user.type(name, ' neu')
+    await user.keyboard('{Escape}')
+    expect(confirm).toHaveBeenCalledOnce()
+    expect(screen.getByRole('dialog', { name: 'Einheit bearbeiten' })).toBeInTheDocument()
+    expect(document.body.style.position).toBe('fixed')
+
+    confirm.mockReturnValue(true)
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: 'Einheit bearbeiten' })).not.toBeInTheDocument()
+    expect(document.body.style.overflow).toBe('')
+    expect(document.body.style.position).toBe('')
+    expect(trigger).toHaveFocus()
   })
 
   it('fragt vor dem Abschluss nach und speichert erst nach Bestätigung', async () => {
