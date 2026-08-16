@@ -266,10 +266,35 @@ function sessionWithIndividualSets(session: GymSession): GymSession {
   return { ...session, exercises: session.exercises.map((exercise) => ({ ...exercise, performedSets: setsForExercise(exercise) })) }
 }
 
+function loadExpandedExercises(storageKey: string, session: GymSession | null) {
+  if (!session) return new Set<string>()
+  try {
+    const parsed: unknown = JSON.parse(sessionStorage.getItem(`${storageKey}-expanded`) ?? 'null')
+    const exerciseIds = new Set(session.exercises.map((exercise) => exercise.id))
+    if (Array.isArray(parsed) && parsed.every((id) => typeof id === 'string' && exerciseIds.has(id))) return new Set(parsed)
+  } catch { /* use initial default */ }
+  return new Set(session.exercises[0] ? [session.exercises[0].id] : [])
+}
+
 function validSetWeightInput(value: string) {
   if (value === '') return true
   const parsed = parseDecimalInput(value)
   return parsed !== undefined && parsed >= 0 && parsed <= 1000
+}
+
+function validSetRepsInput(value: string) {
+  if (!/^\d+$/.test(value)) return false
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 100
+}
+
+function validDraftExercise(exercise: GymSessionExercise, weightInputs: Record<string, string>, repsInputs: Record<string, string>) {
+  return Number.isInteger(exercise.sets) && exercise.sets >= 1 && exercise.sets <= 20 &&
+    setsForExercise(exercise).length === exercise.sets && setsForExercise(exercise).every((set) =>
+      Number.isInteger(set.setNumber) && Number.isInteger(set.reps) && set.reps >= 1 && set.reps <= 100 &&
+      (set.weightKg === undefined || (Number.isFinite(set.weightKg) && set.weightKg >= 0 && set.weightKg <= 1000)) &&
+      validSetWeightInput(weightInputs[set.id] ?? formatDecimalInput(set.weightKg)) &&
+      validSetRepsInput(repsInputs[set.id] ?? String(set.reps)))
 }
 
 export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_STORAGE_KEY, onEditorDirtyChange }: GymViewProps) {
@@ -278,6 +303,10 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
   const [setWeightInputs, setSetWeightInputs] = useState<Record<string, string>>(() => Object.fromEntries(
     initialDraft?.exercises.flatMap((exercise) => setsForExercise(exercise).map((set) => [set.id, formatDecimalInput(set.weightKg)])) ?? [],
   ))
+  const [setRepsInputs, setSetRepsInputs] = useState<Record<string, string>>(() => Object.fromEntries(
+    initialDraft?.exercises.flatMap((exercise) => setsForExercise(exercise).map((set) => [set.id, String(set.reps)])) ?? [],
+  ))
+  const [expandedExerciseIds, setExpandedExerciseIds] = useState<Set<string>>(() => loadExpandedExercises(draftStorageKey, initialDraft))
   const [editingTemplate, setEditingTemplate] = useState<GymTemplate | 'new' | null>(null)
   const [pendingTemplate, setPendingTemplate] = useState<GymTemplate | null>(null)
   const [view, setView] = useState<'landing' | 'history' | 'manage'>('landing')
@@ -287,17 +316,19 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
   const completingRef = useRef(false)
   const activeTitleRef = useRef<HTMLHeadingElement>(null)
   const activeSessionId = draft?.id
-  const draftValid = Boolean(draft && validTrainingDate(draft.date) && !Number.isNaN(Date.parse(draft.startedAt)) && draft.exercises.length > 0 && draft.exercises.every((exercise) =>
-    Number.isInteger(exercise.sets) && exercise.sets >= 1 && exercise.sets <= 20 &&
-    setsForExercise(exercise).length === exercise.sets && setsForExercise(exercise).every((set) =>
-      Number.isInteger(set.setNumber) && Number.isInteger(set.reps) && set.reps >= 1 && set.reps <= 100 &&
-      (set.weightKg === undefined || (Number.isFinite(set.weightKg) && set.weightKg >= 0 && set.weightKg <= 1000)) &&
-      validSetWeightInput(setWeightInputs[set.id] ?? formatDecimalInput(set.weightKg)))))
+  const draftValid = Boolean(draft && validTrainingDate(draft.date) && !Number.isNaN(Date.parse(draft.startedAt)) && draft.exercises.length > 0 &&
+    draft.exercises.every((exercise) => validDraftExercise(exercise, setWeightInputs, setRepsInputs)))
 
   useEffect(() => {
     if (draft) sessionStorage.setItem(draftStorageKey, JSON.stringify(draft))
     else sessionStorage.removeItem(draftStorageKey)
   }, [draft, draftStorageKey])
+
+  useEffect(() => {
+    const key = `${draftStorageKey}-expanded`
+    if (draft) sessionStorage.setItem(key, JSON.stringify([...expandedExerciseIds]))
+    else sessionStorage.removeItem(key)
+  }, [draft, draftStorageKey, expandedExerciseIds])
 
   useEffect(() => {
     if (activeSessionId) activeTitleRef.current?.focus()
@@ -335,6 +366,8 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
       }
     })
     setSetWeightInputs(Object.fromEntries(exercises.flatMap((exercise) => setsForExercise(exercise).map((set) => [set.id, formatDecimalInput(set.weightKg)]))))
+    setSetRepsInputs(Object.fromEntries(exercises.flatMap((exercise) => setsForExercise(exercise).map((set) => [set.id, String(set.reps)]))))
+    setExpandedExerciseIds(new Set(exercises[0] ? [exercises[0].id] : []))
     setDraft({
       id: makeId('gym-session'),
       templateId: template.id,
@@ -375,6 +408,7 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
     setFinishRequested(false)
     setDraft(null)
     sessionStorage.removeItem(draftStorageKey)
+    sessionStorage.removeItem(`${draftStorageKey}-expanded`)
     window.setTimeout(() => {
       completingRef.current = false
       setIsCompleting(false)
@@ -416,6 +450,25 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
     }
     return previous
   }, [data.gymSessions, draft])
+
+  const toggleExercise = (exerciseId: string) => {
+    setExpandedExerciseIds((current) => {
+      const next = new Set(current)
+      if (next.has(exerciseId)) next.delete(exerciseId)
+      else next.add(exerciseId)
+      return next
+    })
+  }
+
+  const requestFinish = () => {
+    const invalidExercise = draft?.exercises.find((exercise) => !validDraftExercise(exercise, setWeightInputs, setRepsInputs))
+    if (invalidExercise) {
+      setExpandedExerciseIds((current) => new Set([...current, invalidExercise.id]))
+      window.setTimeout(() => document.querySelector<HTMLElement>(`[data-exercise-id="${invalidExercise.id}"] [aria-invalid="true"], [data-exercise-id="${invalidExercise.id}"] input:invalid`)?.focus(), 0)
+      return
+    }
+    if (draftValid) setFinishRequested(true)
+  }
 
   return (
     <section className="view gym-view">
@@ -503,18 +556,25 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
           <div className="gym-session-head"><div><p>{formatShortDate(draft.date)}</p><h2 ref={activeTitleRef} tabIndex={-1}>{draft.templateName}</h2></div><span>Aktiv</span></div>
           <div className="gym-live-list">
             {draft.exercises.map((exercise, index) => (
-              <article key={exercise.id} className="gym-live-card">
-                <div className="gym-live-title"><span>{String(index + 1).padStart(2, '0')}</span><strong>{exercise.name}</strong></div>
-                <div className="gym-set-list">
+              <article key={exercise.id} className={`gym-live-card${expandedExerciseIds.has(exercise.id) ? ' expanded' : ''}`} data-exercise-id={exercise.id}>
+                <button type="button" className="gym-live-summary" aria-expanded={expandedExerciseIds.has(exercise.id)} aria-controls={`${exercise.id}-sets`} id={`${exercise.id}-summary`} onClick={() => toggleExercise(exercise.id)}>
+                  <span className="gym-live-index">{String(index + 1).padStart(2, '0')}</span>
+                  <span className="gym-live-plan"><strong>{exercise.name}</strong><small>{exercise.sets} Sätze · {exercise.weightKg === undefined ? 'Körpergewicht' : `${exercise.weightKg.toLocaleString('de-DE')} kg`} · {exercise.reps} Wdh.</small></span>
+                  <span className="gym-live-toggle"><small>{expandedExerciseIds.has(exercise.id) ? 'Offen' : 'Sätze'}</small>{expandedExerciseIds.has(exercise.id) ? <ChevronUp /> : <ChevronDown />}</span>
+                </button>
+                <div className="gym-set-list" id={`${exercise.id}-sets`} role="region" aria-labelledby={`${exercise.id}-summary`} hidden={!expandedExerciseIds.has(exercise.id)}>
                   {setsForExercise(exercise).map((set) => {
                     const previous = exercise.templateExerciseId ? previousByTemplateExercise.get(exercise.templateExerciseId) : undefined
                     const previousSet = previous && setsForExercise(previous)[set.setNumber - 1]
                     const weightInput = setWeightInputs[set.id] ?? formatDecimalInput(set.weightKg)
+                    const repsInput = setRepsInputs[set.id] ?? String(set.reps)
                     const weightInvalid = !validSetWeightInput(weightInput)
-                    const errorId = `${set.id}-weight-error`
+                    const repsInvalid = !validSetRepsInput(repsInput)
+                    const weightErrorId = `${set.id}-weight-error`
+                    const repsErrorId = `${set.id}-reps-error`
                     return <div className="gym-set-row" key={set.id}>
-                      <strong>Satz {set.setNumber}</strong>
-                      <label><span>kg</span><input aria-label={`${exercise.name} Satz ${set.setNumber} Gewicht`} type="text" inputMode="decimal" autoComplete="off" value={weightInput} aria-invalid={weightInvalid} aria-describedby={weightInvalid ? errorId : undefined} onChange={(event) => {
+                      <strong className="gym-set-badge">Satz {set.setNumber}</strong>
+                      <label className={`gym-metric-control${weightInvalid ? ' invalid' : ''}`}><input aria-label={`${exercise.name} Satz ${set.setNumber} Gewicht`} type="text" inputMode="decimal" autoComplete="off" value={weightInput} aria-invalid={weightInvalid} aria-describedby={weightInvalid ? weightErrorId : undefined} onChange={(event) => {
                         const value = event.target.value
                         setSetWeightInputs((current) => ({ ...current, [set.id]: value }))
                         const parsed = parseDecimalInput(value)
@@ -522,18 +582,24 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
                         else if (parsed !== undefined && parsed <= 1000) updateSet(exercise.id, set.id, { weightKg: parsed })
                       }} onBlur={() => {
                         if (validSetWeightInput(weightInput)) setSetWeightInputs((current) => ({ ...current, [set.id]: formatDecimalInput(set.weightKg) }))
-                      }} placeholder="BW" /></label>
-                      <label><span>Wdh.</span><input required aria-label={`${exercise.name} Satz ${set.setNumber} Wiederholungen`} type="number" min="1" max="100" inputMode="numeric" value={set.reps} onChange={(event) => updateSet(exercise.id, set.id, { reps: Number(event.target.value) })} /></label>
-                      {weightInvalid
-                        ? <small id={errorId} className="gym-set-error" role="alert">Gewicht muss zwischen 0 und 1.000 kg liegen.</small>
-                        : <small>{previousSet ? <>Letztes Mal: <b>{previousSet.weightKg === undefined ? 'BW' : `${previousSet.weightKg.toLocaleString('de-DE')} kg`} × {previousSet.reps}</b></> : 'Noch kein Vergleich'}</small>}
+                      }} placeholder="BW" />{weightInput !== '' && <span className="gym-metric-suffix" aria-hidden="true">kg</span>}</label>
+                      <label className={`gym-metric-control reps${repsInvalid ? ' invalid' : ''}`}><input required aria-label={`${exercise.name} Satz ${set.setNumber} Wiederholungen`} aria-invalid={repsInvalid} aria-describedby={repsInvalid ? repsErrorId : undefined} type="number" min="1" max="100" inputMode="numeric" value={repsInput} onChange={(event) => {
+                        const value = event.target.value
+                        setSetRepsInputs((current) => ({ ...current, [set.id]: value }))
+                        if (validSetRepsInput(value)) updateSet(exercise.id, set.id, { reps: Number(value) })
+                      }} /><span className="gym-metric-suffix" aria-hidden="true">Wdh.</span></label>
+                      <div className="gym-set-feedback">
+                        {weightInvalid && <small id={weightErrorId} className="gym-set-error" role="alert">Gewicht muss zwischen 0 und 1.000 kg liegen.</small>}
+                        {repsInvalid && <small id={repsErrorId} className="gym-set-error" role="alert">Wiederholungen müssen zwischen 1 und 100 liegen.</small>}
+                        {!weightInvalid && !repsInvalid && <small>{previousSet ? <>Letztes Mal: <b>{previousSet.weightKg === undefined ? 'BW' : `${previousSet.weightKg.toLocaleString('de-DE')} kg`} × {previousSet.reps}</b></> : 'Noch kein Vergleich'}</small>}
+                      </div>
                     </div>
                   })}
                 </div>
               </article>
             ))}
           </div>
-          <button type="button" className="primary-button full gym-complete" disabled={!draftValid || isCompleting} onClick={() => setFinishRequested(true)}><Check /> Training beenden</button>
+          <button type="button" className="primary-button full gym-complete" disabled={isCompleting} aria-disabled={!draftValid || isCompleting} onClick={requestFinish}><Check /> Training beenden</button>
           <button type="button" className="link-button gym-cancel" onClick={() => { if (window.confirm('Aktuelles Training wirklich abbrechen?')) setDraft(null) }}>Training abbrechen</button>
         </section>
       )}
