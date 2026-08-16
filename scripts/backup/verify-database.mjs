@@ -3,8 +3,8 @@ import Database from 'better-sqlite3'
 import fs from 'node:fs'
 import path from 'node:path'
 
-const EXPECTED_SCHEMA_VERSION = 5
-const REQUIRED_TABLES = ['app_state', 'body_metrics', 'daily_entries', 'goals', 'gym_sessions', 'gym_templates', 'profiles', 'schema_migrations']
+const EXPECTED_SCHEMA_VERSION = 6
+const REQUIRED_TABLES = ['app_state', 'body_metrics', 'daily_entries', 'goals', 'gym_session_sets', 'gym_sessions', 'gym_templates', 'profiles', 'schema_migrations']
 
 function inspectExact(databasePath) {
   const database = new Database(databasePath, { readonly: true, fileMustExist: true })
@@ -57,13 +57,13 @@ async function verifyMigrationOnCopy(databasePath) {
 
 const argumentsList = process.argv.slice(2)
 const allowMigration = argumentsList[0] === '--allow-migrate-from'
-if (allowMigration && argumentsList[1] !== '1..5') throw new Error('Erlaubter Bereich muss explizit 1..5 sein.')
+if (allowMigration && argumentsList[1] !== '1..6') throw new Error('Erlaubter Bereich muss explizit 1..6 sein.')
 const input = allowMigration ? argumentsList[2] : argumentsList[0]
-if (!input || argumentsList.length !== (allowMigration ? 3 : 1)) throw new Error('Aufruf: verify-database.mjs [--allow-migrate-from 1..5] <sqlite-pfad>')
+if (!input || argumentsList.length !== (allowMigration ? 3 : 1)) throw new Error('Aufruf: verify-database.mjs [--allow-migrate-from 1..6] <sqlite-pfad>')
 const databasePath = path.resolve(input)
 if (!fs.existsSync(databasePath) || !fs.statSync(databasePath).isFile()) throw new Error('SQLite-Datei fehlt oder ist keine reguläre Datei.')
 if (allowMigration) await verifyMigrationOnCopy(databasePath)
 else {
   inspectExact(databasePath)
-  console.log('SQLite Schema 5, Profile, quick_check und foreign_key_check: ok')
+  console.log('SQLite Schema 6, Profile, quick_check und foreign_key_check: ok')
 }

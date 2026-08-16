@@ -99,7 +99,14 @@ export function createDemoData(anchor = new Date()): AppData {
       date,
       startedAt: `${date}T17:30:00.000Z`,
       completedAt: `${date}T18:35:00.000Z`,
-      exercises: template.exercises.map((exercise) => ({ id: `demo-session-${date}-${exercise.position}`, templateExerciseId: exercise.id, name: exercise.name, sets: exercise.sets, weightKg: exercise.targetWeightKg, reps: exercise.targetReps, position: exercise.position })),
+      exercises: template.exercises.map((exercise) => ({
+        id: `demo-session-${date}-${exercise.position}`, templateExerciseId: exercise.id, name: exercise.name,
+        sets: exercise.sets, weightKg: exercise.targetWeightKg, reps: exercise.targetReps, position: exercise.position,
+        performedSets: Array.from({ length: exercise.sets }, (_, index) => ({
+          id: `demo-session-${date}-${exercise.position}-set-${index + 1}`, setNumber: index + 1,
+          weightKg: exercise.targetWeightKg, reps: exercise.targetReps,
+        })),
+      })),
     })
   }
 

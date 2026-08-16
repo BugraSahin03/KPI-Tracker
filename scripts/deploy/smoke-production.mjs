@@ -5,12 +5,16 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { createBackup } from '../backup/create-backup.mjs'
+import { waitForHealthyChild } from './wait-for-smoke-health.mjs'
 
 const root = process.cwd()
 const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-production-smoke-'))
 const databasePath = path.join(temporaryDirectory, 'pace.sqlite')
 const port = 43179
 const baseUrl = `http://127.0.0.1:${port}`
+const STARTUP_TIMEOUT_MS = 20_000
+const STARTUP_POLL_INTERVAL_MS = 100
+const HEALTH_REQUEST_TIMEOUT_MS = 1_000
 const productionEnvironment = {
   ...process.env,
   NODE_ENV: 'production', HOST: '127.0.0.1', PORT: String(port),
@@ -26,15 +30,11 @@ async function start() {
   let diagnostics = ''
   child.stdout.on('data', (chunk) => { diagnostics += chunk })
   child.stderr.on('data', (chunk) => { diagnostics += chunk })
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    if (child.exitCode !== null) throw new Error(`Server wurde vorzeitig beendet:\n${diagnostics}`)
-    try {
-      const response = await fetch(`${baseUrl}/api/health`)
-      if (response.ok) return response.json()
-    } catch { /* startup */ }
-    await new Promise((resolve) => setTimeout(resolve, 100))
-  }
-  throw new Error(`Healthcheck-Timeout:\n${diagnostics}`)
+  return waitForHealthyChild({
+    child, healthUrl: `${baseUrl}/api/health`, diagnostics: () => diagnostics,
+    startupTimeoutMs: STARTUP_TIMEOUT_MS, pollIntervalMs: STARTUP_POLL_INTERVAL_MS,
+    requestTimeoutMs: HEALTH_REQUEST_TIMEOUT_MS,
+  })
 }
 
 async function stop() {
@@ -48,7 +48,7 @@ async function stop() {
 
 try {
   const health = await start()
-  if (health.status !== 'ok' || health.sqliteReady !== true || health.schemaVersion !== 5) throw new Error('Unerwartete Health-Antwort.')
+  if (health.status !== 'ok' || health.sqliteReady !== true || health.schemaVersion !== 6) throw new Error('Unerwartete Health-Antwort.')
   const denied = await fetch(`${baseUrl}/api/data`)
   if (denied.status !== 403) throw new Error('API ohne Tailscale-Identität wurde nicht abgelehnt.')
   const headers = { 'Tailscale-User-Login': 'bugra@example.com' }
@@ -73,7 +73,7 @@ try {
   const backup = await createBackup({ databasePath, backupDir: path.join(temporaryDirectory, 'backups'), retentionDays: 30 })
   const verification = new Database(backup.path, { readonly: true })
   if (verification.pragma('integrity_check', { simple: true }) !== 'ok') throw new Error('Backup ist nicht integer.')
-  if (verification.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version !== 5) throw new Error('Backup hat unerwartetes Schema.')
+  if (verification.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version !== 6) throw new Error('Backup hat unerwartetes Schema.')
   verification.close()
   console.log('Production-Smoke, Persistenz, Health, Google-404 und Backup: ok')
 } finally {

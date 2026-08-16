@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest'
 
 const script = fs.readFileSync(path.resolve('scripts/deploy/install-production-service.sh'), 'utf8')
 const restoreScript = fs.readFileSync(path.resolve('scripts/deploy/restore-production.sh'), 'utf8')
+const smokeScript = fs.readFileSync(path.resolve('scripts/deploy/smoke-production.mjs'), 'utf8')
+const smokeWait = fs.readFileSync(path.resolve('scripts/deploy/wait-for-smoke-health.mjs'), 'utf8')
 
 describe('Production-Installer-Vertrag', () => {
   it('baut und prüft einen validierten staged Kandidaten vor Stop und Symlink-Swap', () => {
@@ -29,6 +31,17 @@ describe('Production-Installer-Vertrag', () => {
     expect(swap).toBeGreaterThan(unitInstall)
     expect(script).toContain('chmod -R u=rwX,g=rX,o= "$candidate"')
     expect(script).toContain('flock -n 9')
+  })
+
+  it('gibt jedem Smoke-Serverstart eine monotone belastbare Deadline', () => {
+    expect(smokeScript).toContain('const STARTUP_TIMEOUT_MS = 20_000')
+    expect(smokeScript).toContain('return waitForHealthyChild({')
+    expect(smokeWait).toContain('const deadline = monotonicNow() + startupTimeoutMs')
+    expect(smokeWait).toContain('while (monotonicNow() < deadline)')
+    expect(smokeWait).toContain('AbortSignal.timeout')
+    expect(smokeWait).toContain('assertChildRunning()')
+    expect(smokeWait).toContain('Healthcheck-Timeout:\\n${diagnostics()}')
+    expect(smokeScript).not.toContain('attempt < 50')
   })
 
   it('paart DB-Backup und alten Symlink und hat einen Sidecar-sicheren Fehlerrollback', () => {

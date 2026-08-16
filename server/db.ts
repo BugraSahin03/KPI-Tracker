@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { DEFAULT_PROFILE_ID, type AppData, type BodyMetric, type DataMutation, type GymSession, type GymTemplate, type Profile, type ProfileId } from '../src/types.js'
+import { legacyGymSetId } from '../src/lib/storage.js'
 import { config } from './config.js'
 import { dateKeyInTimeZone } from './time.js'
 
@@ -263,10 +264,18 @@ export class PaceDatabase {
     )
     const insert = this.db.prepare(`INSERT INTO gym_session_exercises
       (profile_id,id,session_id,template_exercise_id,name,sets,weight_kg,reps,position) VALUES (?,?,?,?,?,?,?,?,?)`)
+    const insertSet = this.db.prepare(`INSERT INTO gym_session_sets
+      (profile_id,id,session_exercise_id,set_number,weight_kg,reps) VALUES (?,?,?,?,?,?)`)
     for (const exercise of session.exercises) insert.run(
       profileId, exercise.id, session.id, exercise.templateExerciseId ?? null, exercise.name, exercise.sets,
       exercise.weightKg ?? null, exercise.reps, exercise.position,
     )
+    for (const exercise of session.exercises) {
+      const performedSets = exercise.performedSets ?? Array.from({ length: exercise.sets }, (_, index) => ({
+        id: legacyGymSetId(exercise.id, index + 1), setNumber: index + 1, weightKg: exercise.weightKg, reps: exercise.reps,
+      }))
+      for (const set of performedSets) insertSet.run(profileId, set.id, exercise.id, set.setNumber, set.weightKg ?? null, set.reps)
+    }
   }
 
   upsertGooglePoint(point: GoogleMetricPoint) {
@@ -414,6 +423,10 @@ function rowToGymSession(db: Database.Database, row: Row, profileId: string): Gy
       ...(exercise.weight_kg == null ? {} : { weightKg: Number(exercise.weight_kg) }),
       reps: Number(exercise.reps),
       position: Number(exercise.position),
+      performedSets: (db.prepare('SELECT * FROM gym_session_sets WHERE profile_id=? AND session_exercise_id=? ORDER BY set_number').all(profileId, exercise.id) as Row[]).map((set) => ({
+        id: String(set.id), setNumber: Number(set.set_number),
+        ...(set.weight_kg == null ? {} : { weightKg: Number(set.weight_kg) }), reps: Number(set.reps),
+      })),
     })),
   }
 }
@@ -428,4 +441,4 @@ function integrityError() {
   return error
 }
 
-export const EXPECTED_SCHEMA_VERSION = 5
+export const EXPECTED_SCHEMA_VERSION = 6

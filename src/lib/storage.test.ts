@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createInitialData, isAppData, isBodyMetric, loadData, saveData, setEntryStatus, STORAGE_KEY } from './storage'
+import { createInitialData, isAppData, isBodyMetric, legacyGymSetId, loadData, saveData, setEntryStatus, STORAGE_KEY } from './storage'
 
 function memoryStorage(initial?: string) {
   let value = initial ?? null
@@ -119,5 +119,15 @@ describe('Storage-Layer', () => {
     expect(isBodyMetric({ ...base, measuredAt: '2026-08-01T09:00:00.123456789+02:00' })).toBe(true)
     expect(isBodyMetric({ ...base, measuredAt: '2026-08-01 09:00:00' })).toBe(false)
     expect(isBodyMetric({ ...base, measuredAt: '2026-02-30T09:00:00Z' })).toBe(false)
+  })
+
+  it('erzeugt für lange Legacy-Übungs-IDs stabile begrenzte Satz-IDs', () => {
+    const sharedPrefix = `e${'x'.repeat(98)}`
+    const first = `${sharedPrefix}a`
+    const second = `${sharedPrefix}b`
+    const ids = [legacyGymSetId(first, 1), legacyGymSetId(first, 2), legacyGymSetId(second, 1)]
+    expect(ids).toEqual([legacyGymSetId(first, 1), legacyGymSetId(first, 2), legacyGymSetId(second, 1)])
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(ids.every((id) => id.length <= 100 && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(id))).toBe(true)
   })
 })
