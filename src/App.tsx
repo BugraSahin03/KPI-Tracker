@@ -56,6 +56,7 @@ import {
   todayKey,
 } from './lib/date'
 import { calculateStats, dayGoalProgress, goalsForDate, sortBodyMetricsNewestFirst, statusFor } from './lib/stats'
+import { parseDecimalInput } from './lib/decimal'
 import { loadData, makeId, setEntryStatus, STORAGE_KEY, toggleGoalActive } from './lib/storage'
 import { DEFAULT_PROFILE_ID, type AppData, type BodyMetric, type DataMutation, type Goal, type GoalIcon, type GoalStatus, type Period, type Profile, type ProfileId } from './types'
 import { createDemoData } from './lib/demo'
@@ -1048,6 +1049,7 @@ function BodyView({
   const [weight, setWeight] = useState('')
   const [muscle, setMuscle] = useState('')
   const [editingMetricId, setEditingMetricId] = useState<string | null>(null)
+  const [formError, setFormError] = useState<string | null>(null)
   const [integration, setIntegration] = useState<GoogleHealthStatus | null>(null)
   const [syncing, setSyncing] = useState(false)
   const metrics = sortBodyMetricsNewestFirst(data.bodyMetrics)
@@ -1073,6 +1075,13 @@ function BodyView({
   const submit = (event: FormEvent) => {
     event.preventDefault()
     if (!weight && !muscle) return
+    const parsedWeight = weight ? parseDecimalInput(weight) : undefined
+    const parsedMuscle = muscle ? parseDecimalInput(muscle) : undefined
+    if ((weight && (parsedWeight === undefined || parsedWeight <= 0 || parsedWeight > 500)) ||
+      (muscle && (parsedMuscle === undefined || parsedMuscle <= 0 || parsedMuscle > 300))) {
+      setFormError('Bitte gib gültige Werte ein – Komma und Punkt sind möglich.')
+      return
+    }
     const existing = editingMetricId
       ? data.bodyMetrics.find((metric) => metric.id === editingMetricId)
       : undefined
@@ -1080,8 +1089,8 @@ function BodyView({
       ...existing,
       id: existing?.id ?? makeId('body'),
       date,
-      weightKg: weight ? Number(weight.replace(',', '.')) : existing?.weightKg,
-      muscleMassKg: muscle ? Number(muscle.replace(',', '.')) : existing?.muscleMassKg,
+      weightKg: parsedWeight ?? existing?.weightKg,
+      muscleMassKg: parsedMuscle ?? existing?.muscleMassKg,
       source: existing?.source === 'google-health' ? 'mixed' : (existing?.source ?? 'manual'),
       measuredAt: existing?.measuredAt,
       createdAt: existing?.createdAt ?? new Date().toISOString(),
@@ -1095,6 +1104,7 @@ function BodyView({
     setWeight('')
     setMuscle('')
     setEditingMetricId(null)
+    setFormError(null)
   }
 
   return (
@@ -1167,13 +1177,14 @@ function BodyView({
         <div className="form-row">
           <label>
             <span>Gewicht (kg)</span>
-            <input type="number" min="1" max="500" step="0.1" inputMode="decimal" value={weight} onChange={(event) => setWeight(event.target.value)} placeholder="82,4" />
+            <input type="text" inputMode="decimal" autoComplete="off" value={weight} onChange={(event) => { setWeight(event.target.value); setFormError(null) }} placeholder="82,4" aria-invalid={Boolean(formError)} />
           </label>
           <label>
             <span>Muskelmasse (kg)</span>
-            <input type="number" min="1" max="300" step="0.1" inputMode="decimal" value={muscle} onChange={(event) => setMuscle(event.target.value)} placeholder="60,2" />
+            <input type="text" inputMode="decimal" autoComplete="off" value={muscle} onChange={(event) => { setMuscle(event.target.value); setFormError(null) }} placeholder="60,2" aria-invalid={Boolean(formError)} />
           </label>
         </div>
+        {formError && <p className="gym-form-error" role="alert">{formError}</p>}
         <button type="submit" className="primary-button full"><Plus size={18} /> Messung speichern</button>
       </form>
       <div className="metric-summary">

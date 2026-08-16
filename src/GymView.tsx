@@ -1,8 +1,9 @@
 import { ArrowLeft, ArrowRight, Check, ChevronDown, ChevronUp, Dumbbell, Eye, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { formatShortDate, todayKey } from './lib/date'
-import { isGymSession, makeId } from './lib/storage'
-import type { AppData, GymSession, GymSessionExercise, GymTemplate, GymTemplateExercise } from './types'
+import { formatDecimalInput, parseDecimalInput } from './lib/decimal'
+import { isGymSession, legacyGymSetId, makeId } from './lib/storage'
+import type { AppData, GymSession, GymSessionExercise, GymSessionSet, GymTemplate, GymTemplateExercise } from './types'
 
 type GymViewProps = {
   data: AppData
@@ -92,12 +93,16 @@ function TemplateEditor({ template, onSave, onCancel, onDirtyChange }: {
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
+    if (exercises.some((exercise) => exercise.weight !== '' && parseDecimalInput(exercise.weight) === undefined)) {
+      setFormError('Bitte prüfe das Gewicht – Komma und Punkt sind möglich.')
+      return
+    }
     const now = new Date().toISOString()
     const normalized: GymTemplateExercise[] = exercises.map((exercise, position) => ({
       id: exercise.id,
       name: exercise.name.trim(),
       sets: Number(exercise.sets),
-      ...(exercise.weight === '' ? {} : { targetWeightKg: Number(exercise.weight) }),
+      ...(exercise.weight === '' ? {} : { targetWeightKg: parseDecimalInput(exercise.weight) as number }),
       targetReps: Number(exercise.reps),
       position,
     }))
@@ -107,7 +112,7 @@ function TemplateEditor({ template, onSave, onCancel, onDirtyChange }: {
       setFormError('Jede Übung darf pro Einheit nur einmal vorkommen.')
       return
     }
-    if (normalized.some((exercise) => exercise.sets < 1 || exercise.sets > 20 || exercise.targetReps < 1 || exercise.targetReps > 100 || (exercise.targetWeightKg !== undefined && (exercise.targetWeightKg < 0 || exercise.targetWeightKg > 1000)))) {
+    if (normalized.some((exercise) => !Number.isInteger(exercise.sets) || exercise.sets < 1 || exercise.sets > 20 || !Number.isInteger(exercise.targetReps) || exercise.targetReps < 1 || exercise.targetReps > 100 || (exercise.targetWeightKg !== undefined && (!Number.isFinite(exercise.targetWeightKg) || exercise.targetWeightKg < 0 || exercise.targetWeightKg > 1000)))) {
       setFormError('Bitte prüfe Sätze, Gewicht und Wiederholungen.')
       return
     }
@@ -150,7 +155,7 @@ function TemplateEditor({ template, onSave, onCancel, onDirtyChange }: {
                 <label className="gym-name-field"><span>Name</span><input required maxLength={80} value={exercise.name} onChange={(event) => setExercises(exercises.map((item) => item.id === exercise.id ? { ...item, name: event.target.value } : item))} placeholder="Bankdrücken" /></label>
                 <div className="gym-number-row">
                   <label><span>Sätze</span><input required type="number" inputMode="numeric" min="1" max="20" value={exercise.sets} onChange={(event) => setExercises(exercises.map((item) => item.id === exercise.id ? { ...item, sets: event.target.value } : item))} /></label>
-                  <label><span>kg</span><input type="number" inputMode="decimal" min="0" max="1000" step="0.25" value={exercise.weight} onChange={(event) => setExercises(exercises.map((item) => item.id === exercise.id ? { ...item, weight: event.target.value } : item))} placeholder="BW" /></label>
+                  <label><span>kg</span><input type="text" inputMode="decimal" autoComplete="off" value={exercise.weight} onChange={(event) => setExercises(exercises.map((item) => item.id === exercise.id ? { ...item, weight: event.target.value } : item))} placeholder="BW" /></label>
                   <label><span>Wdh.</span><input required type="number" inputMode="numeric" min="1" max="100" value={exercise.reps} onChange={(event) => setExercises(exercises.map((item) => item.id === exercise.id ? { ...item, reps: event.target.value } : item))} /></label>
                 </div>
               </fieldset>
@@ -247,9 +252,32 @@ function loadGymDraft(storageKey: string): GymSession | null {
   }
 }
 
+function setsForExercise(exercise: GymSessionExercise): GymSessionSet[] {
+  if (exercise.performedSets?.length === exercise.sets) return exercise.performedSets
+  return Array.from({ length: exercise.sets }, (_, index) => ({
+    id: legacyGymSetId(exercise.id, index + 1),
+    setNumber: index + 1,
+    ...(exercise.weightKg === undefined ? {} : { weightKg: exercise.weightKg }),
+    reps: exercise.reps,
+  }))
+}
+
+function sessionWithIndividualSets(session: GymSession): GymSession {
+  return { ...session, exercises: session.exercises.map((exercise) => ({ ...exercise, performedSets: setsForExercise(exercise) })) }
+}
+
+function validSetWeightInput(value: string) {
+  if (value === '') return true
+  const parsed = parseDecimalInput(value)
+  return parsed !== undefined && parsed >= 0 && parsed <= 1000
+}
+
 export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_STORAGE_KEY, onEditorDirtyChange }: GymViewProps) {
   const initialDraft = useMemo(() => loadGymDraft(draftStorageKey), [draftStorageKey])
-  const [draft, setDraft] = useState<GymSession | null>(initialDraft)
+  const [draft, setDraft] = useState<GymSession | null>(() => initialDraft && sessionWithIndividualSets(initialDraft))
+  const [setWeightInputs, setSetWeightInputs] = useState<Record<string, string>>(() => Object.fromEntries(
+    initialDraft?.exercises.flatMap((exercise) => setsForExercise(exercise).map((set) => [set.id, formatDecimalInput(set.weightKg)])) ?? [],
+  ))
   const [editingTemplate, setEditingTemplate] = useState<GymTemplate | 'new' | null>(null)
   const [pendingTemplate, setPendingTemplate] = useState<GymTemplate | null>(null)
   const [view, setView] = useState<'landing' | 'history' | 'manage'>('landing')
@@ -261,8 +289,10 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
   const activeSessionId = draft?.id
   const draftValid = Boolean(draft && validTrainingDate(draft.date) && !Number.isNaN(Date.parse(draft.startedAt)) && draft.exercises.length > 0 && draft.exercises.every((exercise) =>
     Number.isInteger(exercise.sets) && exercise.sets >= 1 && exercise.sets <= 20 &&
-    Number.isInteger(exercise.reps) && exercise.reps >= 1 && exercise.reps <= 100 &&
-    (exercise.weightKg === undefined || (Number.isFinite(exercise.weightKg) && exercise.weightKg >= 0 && exercise.weightKg <= 1000))))
+    setsForExercise(exercise).length === exercise.sets && setsForExercise(exercise).every((set) =>
+      Number.isInteger(set.setNumber) && Number.isInteger(set.reps) && set.reps >= 1 && set.reps <= 100 &&
+      (set.weightKg === undefined || (Number.isFinite(set.weightKg) && set.weightKg >= 0 && set.weightKg <= 1000)) &&
+      validSetWeightInput(setWeightInputs[set.id] ?? formatDecimalInput(set.weightKg)))))
 
   useEffect(() => {
     if (draft) sessionStorage.setItem(draftStorageKey, JSON.stringify(draft))
@@ -287,6 +317,24 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
     const startedAt = new Date().toISOString()
     const template = pendingTemplate
     setPendingTemplate(null)
+    const exercises = template.exercises.map((exercise): GymSessionExercise => {
+      const id = makeId('gym-session-exercise')
+      return {
+        id,
+        templateExerciseId: exercise.id,
+        name: exercise.name,
+        sets: exercise.sets,
+        ...(exercise.targetWeightKg === undefined ? {} : { weightKg: exercise.targetWeightKg }),
+        reps: exercise.targetReps,
+        position: exercise.position,
+        performedSets: Array.from({ length: exercise.sets }, (_, index) => ({
+          id: makeId('gym-session-set'), setNumber: index + 1,
+          ...(exercise.targetWeightKg === undefined ? {} : { weightKg: exercise.targetWeightKg }),
+          reps: exercise.targetReps,
+        })),
+      }
+    })
+    setSetWeightInputs(Object.fromEntries(exercises.flatMap((exercise) => setsForExercise(exercise).map((set) => [set.id, formatDecimalInput(set.weightKg)]))))
     setDraft({
       id: makeId('gym-session'),
       templateId: template.id,
@@ -294,21 +342,18 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
       date: todayKey(),
       startedAt,
       completedAt: startedAt,
-      exercises: template.exercises.map((exercise): GymSessionExercise => ({
-        id: makeId('gym-session-exercise'),
-        templateExerciseId: exercise.id,
-        name: exercise.name,
-        sets: exercise.sets,
-        ...(exercise.targetWeightKg === undefined ? {} : { weightKg: exercise.targetWeightKg }),
-        reps: exercise.targetReps,
-        position: exercise.position,
-      })),
+      exercises,
     })
   }
 
-  const updateExercise = (id: string, values: Partial<GymSessionExercise>) => {
+  const updateSet = (exerciseId: string, setId: string, values: Partial<GymSessionSet>) => {
     if (!draft) return
-    setDraft({ ...draft, exercises: draft.exercises.map((exercise) => exercise.id === id ? { ...exercise, ...values } : exercise) })
+    setDraft({ ...draft, exercises: draft.exercises.map((exercise) => {
+      if (exercise.id !== exerciseId) return exercise
+      const performedSets = setsForExercise(exercise).map((set) => set.id === setId ? { ...set, ...values } : set)
+      const first = performedSets[0]!
+      return { ...exercise, performedSets, reps: first.reps, ...(first.weightKg === undefined ? { weightKg: undefined } : { weightKg: first.weightKg }) }
+    }) })
   }
 
   const complete = () => {
@@ -359,6 +404,18 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
   const closeTemplate = useCallback(() => setEditingTemplate(null), [])
   const sortedSessions = useMemo(() => [...data.gymSessions].sort((a, b) =>
     b.date.localeCompare(a.date) || b.completedAt.localeCompare(a.completedAt)), [data.gymSessions])
+  const previousByTemplateExercise = useMemo(() => {
+    const previous = new Map<string, GymSessionExercise>()
+    const candidates = [...data.gymSessions]
+      .filter((session) => !draft || Date.parse(session.completedAt) < Date.parse(draft.startedAt))
+      .sort((a, b) => Date.parse(b.completedAt) - Date.parse(a.completedAt) || b.date.localeCompare(a.date))
+    for (const session of candidates) {
+      for (const exercise of session.exercises) {
+        if (exercise.templateExerciseId && !previous.has(exercise.templateExerciseId)) previous.set(exercise.templateExerciseId, exercise)
+      }
+    }
+    return previous
+  }, [data.gymSessions, draft])
 
   return (
     <section className="view gym-view">
@@ -404,7 +461,9 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
                       {session.exercises.map((exercise) => (
                         <div className="gym-history-exercise" key={exercise.id}>
                           <strong>{exercise.name}</strong>
-                          <span>{exercise.sets} Sätze · {exercise.weightKg === undefined ? 'Körpergewicht' : `${exercise.weightKg.toLocaleString('de-DE')} kg`} · {exercise.reps} Wdh.</span>
+                          <div className="gym-history-sets">
+                            {setsForExercise(exercise).map((set) => <span key={set.id}><b>Satz {set.setNumber}</b>{set.weightKg === undefined ? 'Körpergewicht' : `${set.weightKg.toLocaleString('de-DE')} kg`} · {set.reps} Wdh.</span>)}
+                          </div>
                         </div>
                       ))}
                       <button type="button" className="link-button danger" onClick={() => removeSession(session)}><Trash2 /> Training löschen</button>
@@ -446,10 +505,30 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
             {draft.exercises.map((exercise, index) => (
               <article key={exercise.id} className="gym-live-card">
                 <div className="gym-live-title"><span>{String(index + 1).padStart(2, '0')}</span><strong>{exercise.name}</strong></div>
-                <div className="gym-number-row">
-                  <label><span>Sätze</span><input required aria-label={`${exercise.name} Sätze`} type="number" min="1" max="20" inputMode="numeric" value={exercise.sets} onChange={(event) => updateExercise(exercise.id, { sets: Number(event.target.value) })} /></label>
-                  <label><span>kg</span><input aria-label={`${exercise.name} Gewicht`} type="number" min="0" max="1000" step="0.25" inputMode="decimal" value={exercise.weightKg ?? ''} onChange={(event) => updateExercise(exercise.id, { weightKg: event.target.value === '' ? undefined : Number(event.target.value) })} placeholder="BW" /></label>
-                  <label><span>Wdh.</span><input required aria-label={`${exercise.name} Wiederholungen`} type="number" min="1" max="100" inputMode="numeric" value={exercise.reps} onChange={(event) => updateExercise(exercise.id, { reps: Number(event.target.value) })} /></label>
+                <div className="gym-set-list">
+                  {setsForExercise(exercise).map((set) => {
+                    const previous = exercise.templateExerciseId ? previousByTemplateExercise.get(exercise.templateExerciseId) : undefined
+                    const previousSet = previous && setsForExercise(previous)[set.setNumber - 1]
+                    const weightInput = setWeightInputs[set.id] ?? formatDecimalInput(set.weightKg)
+                    const weightInvalid = !validSetWeightInput(weightInput)
+                    const errorId = `${set.id}-weight-error`
+                    return <div className="gym-set-row" key={set.id}>
+                      <strong>Satz {set.setNumber}</strong>
+                      <label><span>kg</span><input aria-label={`${exercise.name} Satz ${set.setNumber} Gewicht`} type="text" inputMode="decimal" autoComplete="off" value={weightInput} aria-invalid={weightInvalid} aria-describedby={weightInvalid ? errorId : undefined} onChange={(event) => {
+                        const value = event.target.value
+                        setSetWeightInputs((current) => ({ ...current, [set.id]: value }))
+                        const parsed = parseDecimalInput(value)
+                        if (value === '') updateSet(exercise.id, set.id, { weightKg: undefined })
+                        else if (parsed !== undefined && parsed <= 1000) updateSet(exercise.id, set.id, { weightKg: parsed })
+                      }} onBlur={() => {
+                        if (validSetWeightInput(weightInput)) setSetWeightInputs((current) => ({ ...current, [set.id]: formatDecimalInput(set.weightKg) }))
+                      }} placeholder="BW" /></label>
+                      <label><span>Wdh.</span><input required aria-label={`${exercise.name} Satz ${set.setNumber} Wiederholungen`} type="number" min="1" max="100" inputMode="numeric" value={set.reps} onChange={(event) => updateSet(exercise.id, set.id, { reps: Number(event.target.value) })} /></label>
+                      {weightInvalid
+                        ? <small id={errorId} className="gym-set-error" role="alert">Gewicht muss zwischen 0 und 1.000 kg liegen.</small>
+                        : <small>{previousSet ? <>Letztes Mal: <b>{previousSet.weightKg === undefined ? 'BW' : `${previousSet.weightKg.toLocaleString('de-DE')} kg`} × {previousSet.reps}</b></> : 'Noch kein Vergleich'}</small>}
+                    </div>
+                  })}
                 </div>
               </article>
             ))}

@@ -184,7 +184,7 @@ rollback_activation() {
     if [[ $had_database == true && -f $rollback_snapshot ]]; then
       if [[ -e $DATABASE_PATH || -e $DATABASE_PATH-wal || -e $DATABASE_PATH-shm ]]; then rollback_ok=false
       elif ! install -o pace -g pace -m 0600 "$rollback_snapshot" "$DATABASE_PATH"; then rollback_ok=false
-      elif ! runuser -u pace -- /usr/bin/node "$candidate/scripts/backup/verify-database.mjs" --allow-migrate-from 1..5 "$DATABASE_PATH"; then rollback_ok=false
+      elif ! runuser -u pace -- /usr/bin/node "$candidate/scripts/backup/verify-database.mjs" --allow-migrate-from 1..6 "$DATABASE_PATH"; then rollback_ok=false
       fi
     fi
     if [[ -n $previous_release ]]; then
@@ -244,7 +244,7 @@ if [[ -f $DATABASE_PATH ]]; then
     PACE_DATABASE_PATH="$DATABASE_PATH" PACE_BACKUP_DIR="$release_backup_dir" PACE_BACKUP_RETENTION_DAYS=90 \
     PACE_BACKUP_FILENAME="pace-rollback-$release_stamp.sqlite" \
     /usr/bin/node "$candidate/scripts/backup/create-backup.mjs"
-  runuser -u pace -- /usr/bin/node "$candidate/scripts/backup/verify-database.mjs" --allow-migrate-from 1..5 "$rollback_snapshot"
+  runuser -u pace -- /usr/bin/node "$candidate/scripts/backup/verify-database.mjs" --allow-migrate-from 1..6 "$rollback_snapshot"
 fi
 
 install -o root -g root -m 0644 "$candidate/deploy/pace.service" "$SERVICE_DIR/pace.service"

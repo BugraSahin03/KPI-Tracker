@@ -48,7 +48,7 @@ async function stop() {
 
 try {
   const health = await start()
-  if (health.status !== 'ok' || health.sqliteReady !== true || health.schemaVersion !== 5) throw new Error('Unerwartete Health-Antwort.')
+  if (health.status !== 'ok' || health.sqliteReady !== true || health.schemaVersion !== 6) throw new Error('Unerwartete Health-Antwort.')
   const denied = await fetch(`${baseUrl}/api/data`)
   if (denied.status !== 403) throw new Error('API ohne Tailscale-Identität wurde nicht abgelehnt.')
   const headers = { 'Tailscale-User-Login': 'bugra@example.com' }
@@ -73,7 +73,7 @@ try {
   const backup = await createBackup({ databasePath, backupDir: path.join(temporaryDirectory, 'backups'), retentionDays: 30 })
   const verification = new Database(backup.path, { readonly: true })
   if (verification.pragma('integrity_check', { simple: true }) !== 'ok') throw new Error('Backup ist nicht integer.')
-  if (verification.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version !== 5) throw new Error('Backup hat unerwartetes Schema.')
+  if (verification.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version !== 6) throw new Error('Backup hat unerwartetes Schema.')
   verification.close()
   console.log('Production-Smoke, Persistenz, Health, Google-404 und Backup: ok')
 } finally {

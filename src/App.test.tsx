@@ -73,7 +73,23 @@ describe('Heute-Interaktion', () => {
     await user.click((await screen.findAllByRole('button', { name: 'Körper' })).at(-1)!)
     expect(screen.queryByText('Google Health')).not.toBeInTheDocument()
     expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).includes('/google-health/'))).toBe(false)
-    expect(screen.getByRole('spinbutton', { name: 'Gewicht (kg)' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Gewicht (kg)' })).toBeInTheDocument()
+  })
+
+  it('akzeptiert deutsche und internationale Dezimalwerte für Körpermessungen', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click((await screen.findAllByRole('button', { name: 'Körper' })).at(-1)!)
+    await user.type(screen.getByRole('textbox', { name: 'Gewicht (kg)' }), '78,35')
+    await user.type(screen.getByRole('textbox', { name: 'Muskelmasse (kg)' }), '61.25')
+    await user.click(screen.getByRole('button', { name: 'Messung speichern' }))
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === 'POST')
+      const mutation = JSON.parse(String(calls.at(-1)?.[1]?.body))
+      expect(mutation).toMatchObject({ kind: 'body.upsert', metric: { weightKg: 78.35, muscleMassKg: 61.25 } })
+    })
+    expect(screen.queryByText('Gültigen Wert eingeben')).not.toBeInTheDocument()
   })
 
   it('vereint Verlauf und Insights in einer Analyse hinter fünf Haupttabs', async () => {
@@ -213,13 +229,13 @@ describe('Heute-Interaktion', () => {
     await user.click((await screen.findAllByRole('button', { name: 'GYM' })).at(-1)!)
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: /Training starten/ }))
-    const weight = screen.getByRole('spinbutton', { name: 'Bankdrücken Gewicht' })
+    const weight = screen.getByRole('textbox', { name: 'Bankdrücken Satz 1 Gewicht' })
     await user.clear(weight)
     await user.type(weight, '72.5')
     await user.click((await screen.findAllByRole('button', { name: 'Heute' })).at(-1)!)
     expect(screen.queryByRole('region', { name: 'Aktives Training Push' })).not.toBeInTheDocument()
     await user.click((await screen.findAllByRole('button', { name: 'GYM' })).at(-1)!)
-    expect(screen.getByRole('spinbutton', { name: 'Bankdrücken Gewicht' })).toHaveValue(72.5)
+    expect(screen.getByRole('textbox', { name: 'Bankdrücken Satz 1 Gewicht' })).toHaveValue('72,5')
   })
 
   it('verwirft einen geänderten Trainingsplan beim Tabwechsel nur nach Bestätigung', async () => {
@@ -524,7 +540,7 @@ describe('Heute-Interaktion', () => {
     render(<App />)
     await user.click((await screen.findAllByRole('button', { name: 'Körper' })).at(-1)!)
     await user.click(await screen.findByRole('button', { name: '80 vom 01.08.26 ergänzen' }))
-    await user.type(screen.getByRole('spinbutton', { name: 'Muskelmasse (kg)' }), '60')
+    await user.type(screen.getByRole('textbox', { name: 'Muskelmasse (kg)' }), '60')
     await user.click(screen.getByRole('button', { name: 'Messung speichern' }))
 
     await waitFor(() => expect(capturedMutation).toMatchObject({ kind: 'body.upsert', metric: { id: 'google-morning', muscleMassKg: 60 } }))
@@ -536,7 +552,7 @@ describe('Heute-Interaktion', () => {
     expect(screen.getAllByText('81 kg').length).toBeGreaterThan(0)
 
     capturedMutation = undefined
-    await user.type(screen.getByRole('spinbutton', { name: 'Muskelmasse (kg)' }), '62')
+    await user.type(screen.getByRole('textbox', { name: 'Muskelmasse (kg)' }), '62')
     await user.click(screen.getByRole('button', { name: 'Messung speichern' }))
     await waitFor(() => expect(capturedMutation).toMatchObject({
       kind: 'body.upsert',

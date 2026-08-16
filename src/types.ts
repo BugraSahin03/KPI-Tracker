@@ -75,6 +75,15 @@ export interface GymSessionExercise {
   weightKg?: number
   reps: number
   position: number
+  /** Individual performed sets. Missing only on legacy clients/drafts. */
+  performedSets?: GymSessionSet[]
+}
+
+export interface GymSessionSet {
+  id: string
+  setNumber: number
+  weightKg?: number
+  reps: number
 }
 
 export interface GymSession {

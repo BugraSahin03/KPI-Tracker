@@ -1954,6 +1954,18 @@ fieldset legend {
 .gym-live-title strong { font-size: .86rem; }
 .gym-number-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .gym-number-row input { min-height: 42px; padding: 0 8px; text-align: center; }
+.gym-set-list { display: grid; gap: 8px; }
+.gym-set-row { display: grid; grid-template-columns: 52px minmax(0, 1fr) minmax(0, 1fr); gap: 7px; align-items: end; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--surface) 82%, var(--background)); }
+.gym-set-row > strong { align-self: center; color: var(--muted); font-size: .65rem; }
+.gym-set-row label { display: grid; gap: 4px; }
+.gym-set-row label > span { color: var(--muted); font-size: .58rem; font-weight: 700; text-transform: uppercase; }
+.gym-set-row input { min-height: 42px; padding: 0 7px; text-align: center; }
+.gym-set-row > small { grid-column: 2 / -1; color: var(--muted); font-size: .58rem; }
+.gym-set-row > small b { color: var(--text); }
+.gym-set-row > small.gym-set-error { color: var(--danger); font-weight: 700; }
+.gym-history-sets { display: grid; gap: 4px; }
+.gym-history-sets span { display: flex; gap: 7px; }
+.gym-history-sets b { min-width: 42px; color: var(--text); font-size: .6rem; }
 .gym-complete { margin-top: 16px; }
 .gym-cancel { appearance: none; width: 100%; min-height: 44px; margin-top: 5px; border: 0; color: var(--muted); background: transparent; text-align: center; text-decoration: none; cursor: pointer; }
 

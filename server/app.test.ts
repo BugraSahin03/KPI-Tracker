@@ -6,6 +6,7 @@ import { PaceDatabase } from './db'
 import { GoogleHealthService } from './google-health'
 import { config } from './config'
 import { todayKey } from '../src/lib/date'
+import { legacyGymSetId } from '../src/lib/storage'
 
 let database: PaceDatabase | undefined
 afterEach(() => database?.close())
@@ -41,12 +42,13 @@ describe('Pace API', () => {
     const app = createApp(database, new GoogleHealthService(database))
     const startedAt = new Date(Date.now() - 60_000).toISOString()
     const completedAt = new Date().toISOString()
+    const longExerciseId = `e${'x'.repeat(99)}`
     const mutation = {
       id: 'stable-gym-completion',
       kind: 'gym.session.complete',
       session: {
         id: 'stable-gym-session', templateName: 'Push', date: todayKey(), startedAt, completedAt,
-        exercises: [{ id: 'stable-gym-exercise', name: 'Bankdrücken', sets: 3, weightKg: 72.5, reps: 8, position: 0 }],
+        exercises: [{ id: longExerciseId, name: 'Bankdrücken', sets: 3, weightKg: 72.5, reps: 8, position: 0 }],
       },
     }
 
@@ -57,6 +59,9 @@ describe('Pace API', () => {
     expect(retry.body.applied).toBe(false)
     expect(retry.body.revision).toBe(first.body.revision)
     expect(retry.body.data.gymSessions).toHaveLength(1)
+    const ids = first.body.data.gymSessions[0].exercises[0].performedSets.map((set: { id: string }) => set.id)
+    expect(ids).toEqual([1, 2, 3].map((number) => legacyGymSetId(longExerciseId, number)))
+    expect(ids.every((id: string) => id.length <= 100)).toBe(true)
   })
 
   it('akzeptiert den Berliner Kalendertag direkt nach Mitternacht trotz UTC-Vortag', async () => {
@@ -154,10 +159,10 @@ describe('Pace API', () => {
     }
   })
 
-  it('prüft Health ohne persönliche Daten und meldet Schema 5', async () => {
+  it('prüft Health ohne persönliche Daten und meldet Schema 6', async () => {
     database = new PaceDatabase(':memory:')
     const response = await request(createApp(database, new GoogleHealthService(database))).get('/api/health').expect(200)
-    expect(response.body).toEqual({ status: 'ok', sqliteReady: true, schemaVersion: 5 })
+    expect(response.body).toEqual({ status: 'ok', sqliteReady: true, schemaVersion: 6 })
     expect(JSON.stringify(response.body)).not.toContain('Bugra')
   })
 
@@ -171,9 +176,9 @@ describe('Pace API', () => {
 
   it('liefert bei unerwarteter Schemaversion Health 503', async () => {
     database = new PaceDatabase(':memory:')
-    database.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(6, new Date().toISOString())
+    database.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(7, new Date().toISOString())
     const response = await request(createApp(database, new GoogleHealthService(database))).get('/api/health').expect(503)
-    expect(response.body).toEqual({ status: 'unavailable', sqliteReady: false, schemaVersion: 6 })
+    expect(response.body).toEqual({ status: 'unavailable', sqliteReady: false, schemaVersion: 7 })
   })
 
   it('setzt restriktive Browser-Sicherheitsheader', async () => {

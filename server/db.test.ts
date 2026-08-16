@@ -1,5 +1,8 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it } from 'vitest'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { PaceDatabase } from './db'
 import { createInitialData } from '../src/lib/storage'
 
@@ -63,11 +66,69 @@ describe('PaceDatabase', () => {
     expect(database.applyMutation({ id: 'complete-one', kind: 'gym.session.complete', session }).applied).toBe(true)
     database.applyMutation({ id: 'rename-push', kind: 'gym.template.upsert', template: { ...template, name: 'Push neu', exercises: [{ ...template.exercises[0]!, name: 'Schrägbank' }], updatedAt: '2026-08-03T19:00:00Z' } })
     database.applyMutation({ id: 'delete-push', kind: 'gym.template.delete', templateId: push.id })
-    expect(database.getData().gymSessions).toEqual([expect.objectContaining({ templateName: 'Push', exercises: [expect.objectContaining({ name: 'Bankdrücken', weightKg: 72.5 })] })])
+    expect(database.getData().gymSessions).toEqual([expect.objectContaining({ templateName: 'Push', exercises: [expect.objectContaining({ name: 'Bankdrücken', weightKg: 72.5, performedSets: [
+      expect.objectContaining({ setNumber: 1, weightKg: 72.5, reps: 8 }),
+      expect.objectContaining({ setNumber: 2, weightKg: 72.5, reps: 8 }),
+      expect.objectContaining({ setNumber: 3, weightKg: 72.5, reps: 8 }),
+    ] })] })])
     expect(database.applyMutation({ id: 'complete-again-new-receipt', kind: 'gym.session.complete', session }).applied).toBe(false)
     expect(database.getData().gymSessions).toHaveLength(1)
     database.applyMutation({ id: 'delete-session', kind: 'gym.session.delete', sessionId: session.id })
     expect(database.getData().gymSessions).toHaveLength(0)
+  })
+
+  it('migriert Schema-5-Aggregate verlustfrei in einzelne Satzzeilen', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-schema5-'))
+    const filename = path.join(root, 'pace.sqlite')
+    try {
+      database = new PaceDatabase(filename)
+      const template = database.getData().gymTemplates[0]!
+      const longExerciseId = `e${'m'.repeat(99)}`
+      database.db.exec('DROP TABLE gym_session_sets; DELETE FROM schema_migrations WHERE version=6;')
+      database.db.prepare('INSERT INTO gym_template_exercises(profile_id,id,template_id,name,sets,target_weight_kg,target_reps,position) VALUES (?,?,?,?,?,?,?,?)')
+        .run('profile-bugra', longExerciseId, template.id, 'Deadlift', 3, 100, 20, 0)
+      database.db.prepare('INSERT INTO gym_sessions(profile_id,id,template_id,template_name,date,started_at,completed_at) VALUES (?,?,?,?,?,?,?)')
+        .run('profile-bugra', 'legacy-session', template.id, template.name, '2026-08-01', '2026-08-01T10:00:00Z', '2026-08-01T11:00:00Z')
+      database.db.prepare('INSERT INTO gym_session_exercises(profile_id,id,session_id,template_exercise_id,name,sets,weight_kg,reps,position) VALUES (?,?,?,?,?,?,?,?,?)')
+        .run('profile-bugra', longExerciseId, 'legacy-session', longExerciseId, 'Deadlift', 3, 100, 20, 0)
+      database.close()
+      database = new PaceDatabase(filename)
+      expect(database.health()).toEqual({ sqliteReady: true, schemaVersion: 6 })
+      const migratedSets = database.getData().gymSessions[0]?.exercises[0]?.performedSets
+      expect(migratedSets).toEqual([
+        expect.objectContaining({ setNumber: 1, weightKg: 100, reps: 20 }),
+        expect.objectContaining({ setNumber: 2, weightKg: 100, reps: 20 }),
+        expect.objectContaining({ setNumber: 3, weightKg: 100, reps: 20 }),
+      ])
+      expect(migratedSets?.every((set) => set.id.length <= 100)).toBe(true)
+      const ids = migratedSets?.map((set) => set.id)
+      database.close()
+      database = new PaceDatabase(filename)
+      expect(database.getData().gymSessions[0]?.exercises[0]?.performedSets?.map((set) => set.id)).toEqual(ids)
+    } finally {
+      database?.close()
+      database = undefined
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('persistiert unterschiedliche Satzwerte profilisoliert und lädt sie unverändert', () => {
+    database = new PaceDatabase(':memory:')
+    const makeSession = (weight: number) => ({
+      id: 'same-session', templateName: 'Pull', date: '2026-08-01', startedAt: '2026-08-01T10:00:00Z', completedAt: '2026-08-01T11:00:00Z',
+      exercises: [{
+        id: 'same-exercise', templateExerciseId: 'stable-row', name: 'Deadlift', sets: 3, weightKg: weight, reps: 8, position: 0,
+        performedSets: [
+          { id: 'same-set-1', setNumber: 1, weightKg: weight, reps: 8 },
+          { id: 'same-set-2', setNumber: 2, weightKg: weight + 2.5, reps: 7 },
+          { id: 'same-set-3', setNumber: 3, weightKg: weight + 5, reps: 6 },
+        ],
+      }],
+    })
+    database.applyMutation('profile-bugra', { id: 'same-receipt', kind: 'gym.session.complete', session: makeSession(100) })
+    database.applyMutation('profile-sena', { id: 'same-receipt', kind: 'gym.session.complete', session: makeSession(50) })
+    expect(database.getData('profile-bugra').gymSessions[0]?.exercises[0]?.performedSets?.map(({ weightKg, reps }) => [weightKg, reps])).toEqual([[100, 8], [102.5, 7], [105, 6]])
+    expect(database.getData('profile-sena').gymSessions[0]?.exercises[0]?.performedSets?.map(({ weightKg, reps }) => [weightKg, reps])).toEqual([[50, 8], [52.5, 7], [55, 6]])
   })
 
   it('speichert einen vollständigen Stand transaktional mit Revision', () => {
@@ -152,8 +213,8 @@ describe('PaceDatabase', () => {
 
   it('meldet bei einer unerwarteten Schemaversion nicht ready', () => {
     database = new PaceDatabase(':memory:')
-    database.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(6, new Date().toISOString())
-    expect(database.health()).toEqual({ sqliteReady: false, schemaVersion: 6 })
+    database.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(7, new Date().toISOString())
+    expect(database.health()).toEqual({ sqliteReady: false, schemaVersion: 7 })
   })
 
   it('verwaltet OAuth-States parallel und verbraucht jeden nur einmal', () => {

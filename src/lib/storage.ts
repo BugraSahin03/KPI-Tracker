@@ -211,14 +211,24 @@ export function isGymTemplate(value: unknown): value is GymTemplate {
 
 export function isGymSession(value: unknown): value is GymSession {
   if (!isRecord(value) || !Array.isArray(value.exercises)) return false
-  return isIdentifier(value.id) && (value.templateId === undefined || isIdentifier(value.templateId)) &&
+  const valid = isIdentifier(value.id) && (value.templateId === undefined || isIdentifier(value.templateId)) &&
     typeof value.templateName === 'string' && value.templateName.trim().length > 0 && value.templateName.length <= 50 &&
     isDateKey(value.date) && isTimestamp(value.startedAt) && isTimestamp(value.completedAt) &&
     Date.parse(String(value.startedAt)) <= Date.parse(String(value.completedAt)) && value.exercises.length > 0 &&
     orderedUniqueExercises(value.exercises, (exercise) => isRecord(exercise) && isIdentifier(exercise.id) &&
       (exercise.templateExerciseId === undefined || isIdentifier(exercise.templateExerciseId)) &&
       typeof exercise.name === 'string' && exercise.name.trim().length > 0 && exercise.name.length <= 80 &&
-      Number.isInteger(exercise.position) && validExerciseNumbers(exercise, 'weightKg'))
+      Number.isInteger(exercise.position) && validExerciseNumbers(exercise, 'weightKg') &&
+      (exercise.performedSets === undefined || (Array.isArray(exercise.performedSets) &&
+        exercise.performedSets.length === exercise.sets && exercise.performedSets.every((set, index) =>
+          isRecord(set) && isIdentifier(set.id) && set.setNumber === index + 1 &&
+          Number.isInteger(set.reps) && Number(set.reps) >= 1 && Number(set.reps) <= 100 &&
+          (set.weightKg === undefined || (typeof set.weightKg === 'number' && Number.isFinite(set.weightKg) && set.weightKg >= 0 && set.weightKg <= 1000))) &&
+        new Set(exercise.performedSets.map((set) => isRecord(set) ? set.id : '')).size === exercise.performedSets.length)))
+  if (!valid) return false
+  const setIds = (value.exercises as Record<string, unknown>[]).flatMap((exercise) =>
+    Array.isArray(exercise.performedSets) ? exercise.performedSets.map((set) => isRecord(set) ? String(set.id) : '') : [])
+  return new Set(setIds).size === setIds.length
 }
 
 export function isAppData(value: unknown): value is AppData {
@@ -372,4 +382,25 @@ export function toggleGoalActive(goal: Goal, date = todayKey()): Goal {
 
 export function makeId(prefix: string) {
   return `${prefix}-${todayKey()}-${Math.random().toString(36).slice(2, 9)}`
+}
+
+/** Deterministic, identifier-safe fallback for legacy exercises without sets. */
+export function legacyGymSetId(exerciseId: string, setNumber: number) {
+  let first = 1779033703
+  let second = 3144134277
+  let third = 1013904242
+  let fourth = 2773480762
+  for (let index = 0; index < exerciseId.length; index++) {
+    const code = exerciseId.charCodeAt(index)
+    first = second ^ Math.imul(first ^ code, 597399067)
+    second = third ^ Math.imul(second ^ code, 2869860233)
+    third = fourth ^ Math.imul(third ^ code, 951274213)
+    fourth = first ^ Math.imul(fourth ^ code, 2716044179)
+  }
+  first = Math.imul(third ^ (first >>> 18), 597399067)
+  second = Math.imul(fourth ^ (second >>> 22), 2869860233)
+  third = Math.imul(first ^ (third >>> 17), 951274213)
+  fourth = Math.imul(second ^ (fourth >>> 19), 2716044179)
+  const digest = [first, second, third, fourth].map((part) => (part >>> 0).toString(16).padStart(8, '0')).join('')
+  return `legacy-set-${exerciseId.slice(0, 44)}-${digest}-${setNumber}`
 }
