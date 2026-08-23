@@ -250,6 +250,13 @@ describe('GYM-Workflow', () => {
     await user.clear(weight)
     await user.type(weight, '72.5')
     first.unmount()
+    const addedAfterStart = session('added-after-start', '2026-08-20')
+    addedAfterStart.exercises[0] = { ...addedAfterStart.exercises[0]!, weightKg: 99, performedSets: [
+      { id: 'added-1', setNumber: 1, weightKg: 99, reps: 8 },
+      { id: 'added-2', setNumber: 2, weightKg: 99, reps: 8 },
+      { id: 'added-3', setNumber: 3, weightKg: 99, reps: 8 },
+    ] }
+    data.gymSessions = [addedAfterStart]
     render(<Harness initial={data} />)
     expect(screen.getByRole('textbox', { name: 'Bankdrücken Satz 1 Gewicht' })).toHaveValue('72,5')
   })
@@ -276,10 +283,171 @@ describe('GYM-Workflow', () => {
 
     const changed = onChange.mock.calls[0]![0] as AppData
     expect(changed.gymSessions.at(-1)?.exercises[0]?.performedSets).toEqual([
-      expect.objectContaining({ setNumber: 1, weightKg: 70, reps: 8 }),
+      expect.objectContaining({ setNumber: 1, weightKg: 72.5, reps: 8 }),
       expect.objectContaining({ setNumber: 2, weightKg: 75.5, reps: 9 }),
-      expect.objectContaining({ setNumber: 3, weightKg: 70, reps: 8 }),
+      expect.objectContaining({ setNumber: 3, weightKg: 72.5, reps: 8 }),
     ])
+  })
+
+  it('übernimmt die letzten Gewichte satzgenau und zeigt gemischte Werte kompakt im Header', async () => {
+    const user = userEvent.setup()
+    const data = withPushExercise()
+    data.gymTemplates[0]!.exercises[0]!.targetWeightKg = 40
+    const previous = session('mixed', '2026-08-20')
+    previous.exercises[0]!.performedSets = [
+      { id: 'mixed-1', setNumber: 1, weightKg: 70, reps: 10 },
+      { id: 'mixed-2', setNumber: 2, weightKg: 70, reps: 9 },
+      { id: 'mixed-3', setNumber: 3, weightKg: 120, reps: 8 },
+    ]
+    data.gymSessions = [previous]
+    render(<Harness initial={data} />)
+    await user.click(screen.getByRole('button', { name: 'Push starten' }))
+    await user.click(screen.getByRole('button', { name: 'Training starten' }))
+
+    expect(screen.getByRole('textbox', { name: 'Bankdrücken Satz 1 Gewicht' })).toHaveValue('70')
+    expect(screen.getByRole('textbox', { name: 'Bankdrücken Satz 2 Gewicht' })).toHaveValue('70')
+    expect(screen.getByRole('textbox', { name: 'Bankdrücken Satz 3 Gewicht' })).toHaveValue('120')
+    expect(screen.getByRole('button', { name: /Bankdrücken.*70 \/ 70 \/ 120 kg/ })).toBeInTheDocument()
+  })
+
+  it('nutzt ohne Historie einmalig das Legacy-Templategewicht und startet neue Übungen leer', async () => {
+    const user = userEvent.setup()
+    const legacy = withPushExercise()
+    const first = render(<GymView data={legacy} onChange={vi.fn()} draftStorageKey="legacy-weight-draft" />)
+    await user.click(screen.getByRole('button', { name: 'Push starten' }))
+    await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    expect(screen.getAllByRole('textbox', { name: /Bankdrücken Satz \d Gewicht/ }).map((input) => (input as HTMLInputElement).value)).toEqual(['70', '70', '70'])
+    first.unmount()
+    sessionStorage.removeItem('legacy-weight-draft')
+    sessionStorage.removeItem('legacy-weight-draft-expanded')
+
+    const fresh = withPushExercise()
+    delete fresh.gymTemplates[0]!.exercises[0]!.targetWeightKg
+    render(<GymView data={fresh} onChange={vi.fn()} draftStorageKey="fresh-weight-draft" />)
+    await user.click(screen.getByRole('button', { name: 'Push starten' }))
+    await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    expect(screen.getAllByRole('textbox', { name: /Bankdrücken Satz \d Gewicht/ }).map((input) => (input as HTMLInputElement).value)).toEqual(['', '', ''])
+    expect(screen.getByRole('button', { name: /Bankdrücken.*Gewicht offen/ })).toBeInTheDocument()
+  })
+
+  it('lässt zusätzliche Sätze bei vorhandener Historie leer und übernimmt bei weniger Sätzen nur die ersten', async () => {
+    const user = userEvent.setup()
+    const previous = session('three', '2026-08-20')
+    previous.exercises[0]!.performedSets = [
+      { id: 'three-1', setNumber: 1, weightKg: 70, reps: 8 },
+      { id: 'three-2', setNumber: 2, weightKg: 75, reps: 8 },
+      { id: 'three-3', setNumber: 3, weightKg: 80, reps: 8 },
+    ]
+    const more = withPushExercise()
+    more.gymTemplates[0]!.exercises[0]!.sets = 4
+    more.gymSessions = [previous]
+    const first = render(<GymView data={more} onChange={vi.fn()} draftStorageKey="more-sets-draft" />)
+    await user.click(screen.getByRole('button', { name: 'Push starten' }))
+    await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    expect(screen.getAllByRole('textbox', { name: /Bankdrücken Satz \d Gewicht/ }).map((input) => (input as HTMLInputElement).value)).toEqual(['70', '75', '80', ''])
+    first.unmount()
+    sessionStorage.removeItem('more-sets-draft')
+    sessionStorage.removeItem('more-sets-draft-expanded')
+
+    const fewer = withPushExercise()
+    fewer.gymTemplates[0]!.exercises[0]!.sets = 2
+    fewer.gymSessions = [previous]
+    render(<GymView data={fewer} onChange={vi.fn()} draftStorageKey="fewer-sets-draft" />)
+    await user.click(screen.getByRole('button', { name: 'Push starten' }))
+    await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    expect(screen.getAllByRole('textbox', { name: /Bankdrücken Satz \d Gewicht/ }).map((input) => (input as HTMLInputElement).value)).toEqual(['70', '75'])
+  })
+
+  it('normalisiert unvollständige, unsortierte und doppelte historische Satznummern deterministisch', async () => {
+    const user = userEvent.setup()
+    const data = withPushExercise()
+    data.gymTemplates[0]!.exercises[0]!.targetWeightKg = 40
+    const previous = session('irregular', '2026-08-20')
+    previous.exercises[0]!.performedSets = [
+      { id: 'z-duplicate', setNumber: 2, weightKg: 80, reps: 7 },
+      { id: 'extra', setNumber: 4, weightKg: 200, reps: 5 },
+      { id: 'set-one', setNumber: 1, weightKg: 70, reps: 10 },
+      { id: 'a-duplicate', setNumber: 2, weightKg: 75, reps: 8 },
+    ]
+    data.gymSessions = [previous]
+    render(<Harness initial={data} />)
+
+    await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
+    await user.click(screen.getByRole('button', { name: /20.08.26/ }))
+    expect(screen.getByText('Nicht erfasst')).toBeInTheDocument()
+    expect(screen.queryByText(/200 kg/)).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Zurück zu GYM' }))
+    await user.click(screen.getByRole('button', { name: 'Push starten' }))
+    await user.click(screen.getByRole('button', { name: 'Training starten' }))
+
+    expect(screen.getAllByRole('textbox', { name: /Bankdrücken Satz \d Gewicht/ }).map((input) => (input as HTMLInputElement).value)).toEqual(['70', '75', ''])
+    expect(screen.getByRole('button', { name: /Bankdrücken.*70 \/ 75 \/ – kg/ })).toBeInTheDocument()
+    expect(screen.getAllByText(/Letztes Mal:/)).toHaveLength(2)
+    expect(screen.queryByText(/200 kg/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/40 kg/)).not.toBeInTheDocument()
+  })
+
+  it('behandelt ein abgeschlossenes Set ohne Gewicht im Folgetraining als nicht erfasst statt als Körpergewicht', async () => {
+    const user = userEvent.setup()
+    const data = withPushExercise()
+    const previous = session('without-weight', '2026-08-20')
+    previous.exercises[0] = {
+      ...previous.exercises[0]!, weightKg: undefined,
+      performedSets: [1, 2, 3].map((setNumber) => ({ id: `without-${setNumber}`, setNumber, reps: 8 })),
+    }
+    data.gymSessions = [previous]
+    render(<Harness initial={data} />)
+
+    await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
+    await user.click(screen.getByRole('button', { name: /20.08.26/ }))
+    expect(screen.getAllByText(/Nicht erfasst/)).toHaveLength(3)
+    expect(document.body).not.toHaveTextContent(/Körpergewicht|\bBW\b/)
+    await user.click(screen.getByRole('button', { name: 'Zurück zu GYM' }))
+    await user.click(screen.getByRole('button', { name: 'Push starten' }))
+    await user.click(screen.getByRole('button', { name: 'Training starten' }))
+
+    const weights = screen.getAllByRole('textbox', { name: /Bankdrücken Satz \d Gewicht/ })
+    expect(weights.map((input) => (input as HTMLInputElement).value)).toEqual(['', '', ''])
+    expect(weights.every((input) => input.getAttribute('placeholder') === 'kg')).toBe(true)
+    expect(screen.getAllByText(/Letztes Mal:/)).toHaveLength(3)
+    expect(screen.getAllByText(/Nicht erfasst × 8/)).toHaveLength(3)
+    expect(screen.getByRole('button', { name: /Bankdrücken.*Gewicht offen/ })).toBeInTheDocument()
+    expect(document.body).not.toHaveTextContent(/Körpergewicht|\bBW\b/)
+  })
+
+  it('blendet Gewicht im Templateeditor aus, bewahrt Legacy-Fallbacks bei Änderungen und gibt neuen Übungen keines', async () => {
+    const user = userEvent.setup()
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const onChange = vi.fn()
+    const data = withPushExercise()
+    data.gymExercises = [{ id: 'canonical-bench', name: 'Bankdrücken', createdAt: '2026-08-03T00:00:00.000Z', updatedAt: '2026-08-03T00:00:00.000Z' }]
+    data.gymTemplates[0]!.exercises[0]!.exerciseId = 'canonical-bench'
+    render(<GymView data={data} onChange={onChange} />)
+    await user.click(screen.getByRole('button', { name: 'Einheiten verwalten' }))
+    await user.click(screen.getByRole('button', { name: 'Push bearbeiten' }))
+    const dialog = screen.getByRole('dialog', { name: 'Einheit bearbeiten' })
+    expect(within(dialog).queryByText(/^kg$/i)).not.toBeInTheDocument()
+    expect(within(dialog).queryByPlaceholderText('kg')).not.toBeInTheDocument()
+    await user.clear(within(dialog).getByRole('textbox', { name: 'Name' }))
+    await user.type(within(dialog).getByRole('textbox', { name: 'Name' }), 'Schrägbankdrücken')
+    await user.clear(within(dialog).getByRole('spinbutton', { name: 'Sätze' }))
+    await user.type(within(dialog).getByRole('spinbutton', { name: 'Sätze' }), '4')
+    const reps = within(dialog).getByRole('textbox', { name: 'Schrägbankdrücken Wiederholungsvorgabe' })
+    await user.clear(reps)
+    await user.type(reps, '10-12')
+    await user.click(within(dialog).getByRole('button', { name: 'Übung hinzufügen' }))
+    const names = within(dialog).getAllByRole('textbox', { name: 'Name' })
+    await user.type(names[1]!, 'Butterfly')
+    await user.click(within(dialog).getByRole('button', { name: 'Einheit speichern' }))
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('verknüpfte Historie'))
+    const changed = onChange.mock.calls[0]![0] as AppData
+    expect(onChange.mock.calls[0]![1]).toEqual([
+      expect.objectContaining({ kind: 'gym.exercise.rename', exerciseId: 'canonical-bench', expectedName: 'Bankdrücken', name: 'Schrägbankdrücken' }),
+      expect.objectContaining({ kind: 'gym.template.upsert' }),
+    ])
+    expect(changed.gymTemplates[0]?.exercises[0]).toMatchObject({ name: 'Schrägbankdrücken', sets: 4, targetReps: 10, targetRepsMax: 12, targetWeightKg: 70 })
+    expect(changed.gymTemplates[0]?.exercises[1]).toMatchObject({ name: 'Butterfly', sets: 3, targetReps: 10 })
+    expect(changed.gymTemplates[0]?.exercises[1]).not.toHaveProperty('targetWeightKg')
   })
 
   it('folgt für Vortrainingsvergleiche der Timestamp-Chronologie statt inkonsistenter Import-Datumswerte', async () => {
@@ -309,6 +477,7 @@ describe('GYM-Workflow', () => {
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: 'Training starten' }))
     expect(screen.getAllByText(/85 kg × 8/)).toHaveLength(3)
+    expect(screen.getAllByRole('textbox', { name: /Bankdrücken Satz \d Gewicht/ }).map((input) => (input as HTMLInputElement).value)).toEqual(['85', '85', '85'])
     expect(screen.queryByText(/99 kg/)).not.toBeInTheDocument()
     expect(screen.queryByText(/150 kg/)).not.toBeInTheDocument()
   })
@@ -508,7 +677,7 @@ describe('GYM-Workflow', () => {
     expect(screen.getByRole('button', { name: 'Training beenden' })).toHaveAttribute('aria-disabled', 'false')
   })
 
-  it('zeigt bei Körpergewicht kein widersprüchliches kg-Suffix', async () => {
+  it('zeigt ein nicht erfasstes Gewicht neutral und ohne widersprüchliches kg-Suffix', async () => {
     const user = userEvent.setup()
     const data = withPushExercise()
     delete data.gymTemplates[0]!.exercises[0]!.targetWeightKg
@@ -518,7 +687,7 @@ describe('GYM-Workflow', () => {
     const weight = screen.getByRole('textbox', { name: 'Bankdrücken Satz 1 Gewicht' })
     const control = weight.closest('.gym-metric-control')!
     expect(weight).toHaveValue('')
-    expect(weight).toHaveAttribute('placeholder', 'BW')
+    expect(weight).toHaveAttribute('placeholder', 'kg')
     expect(control.querySelector('.gym-metric-suffix')).not.toBeInTheDocument()
   })
 
@@ -557,5 +726,212 @@ describe('GYM-Workflow', () => {
     expect(document.getElementById(repsErrorId!)).not.toBeInTheDocument()
     expect(within(row).queryByRole('alert')).not.toBeInTheDocument()
     expect(within(row).getByText('Noch kein Vergleich')).toBeInTheDocument()
+  })
+
+  it('speichert eine Wiederholungsrange normalisiert und nutzt je Satz weiterhin ganze Ist-Werte', async () => {
+    const user = userEvent.setup()
+    render(<Harness initial={withPushExercise()} />)
+    await user.click(screen.getByRole('button', { name: 'Einheiten verwalten' }))
+    await user.click(screen.getByRole('button', { name: 'Push bearbeiten' }))
+    const target = screen.getByRole('textbox', { name: 'Bankdrücken Wiederholungsvorgabe' })
+    await user.clear(target)
+    await user.type(target, '8 - 12')
+    await user.tab()
+    expect(target).toHaveValue('8–12')
+    await user.click(screen.getByRole('button', { name: 'Einheit speichern' }))
+    await user.click(screen.getByRole('button', { name: 'Zurück zu GYM' }))
+    await user.click(screen.getByRole('button', { name: 'Push starten' }))
+    await user.click(screen.getByRole('button', { name: 'Training starten' }))
+
+    expect(screen.getByRole('button', { name: /Bankdrücken.*8–12 Wdh/ })).toBeInTheDocument()
+    expect(screen.getByRole('spinbutton', { name: 'Bankdrücken Satz 1 Wiederholungen' })).toHaveValue(8)
+  })
+
+  it('erklärt ungültige Wiederholungsbereiche im Vorlageneditor', async () => {
+    const user = userEvent.setup()
+    render(<Harness initial={withPushExercise()} />)
+    await user.click(screen.getByRole('button', { name: 'Einheiten verwalten' }))
+    await user.click(screen.getByRole('button', { name: 'Push bearbeiten' }))
+    const target = screen.getByRole('textbox', { name: 'Bankdrücken Wiederholungsvorgabe' })
+    await user.clear(target)
+    await user.type(target, '12-8')
+    await user.click(screen.getByRole('button', { name: 'Einheit speichern' }))
+    expect(screen.getByRole('alert')).toHaveTextContent('Zahl oder Bereich')
+    expect(screen.getByRole('dialog', { name: 'Einheit bearbeiten' })).toBeInTheDocument()
+  })
+
+  it('persistiert Erledigt- und Steigerungsmarkierung im Draft und speichert beide beim Abschluss', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const data = withPushExercise()
+    const first = render(<GymView data={data} onChange={onChange} draftStorageKey="progress-draft" />)
+    await user.click(screen.getByRole('button', { name: 'Push starten' }))
+    await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    await user.click(screen.getByRole('checkbox', { name: 'Bankdrücken als erledigt markieren' }))
+    await user.click(screen.getByRole('checkbox', { name: 'Bankdrücken: nächstes Mal Gewicht steigern' }))
+    expect(document.querySelector('[data-exercise-id]')).toHaveClass('completed')
+    first.unmount()
+
+    render(<GymView data={data} onChange={onChange} draftStorageKey="progress-draft" />)
+    expect(screen.getByRole('checkbox', { name: 'Bankdrücken als erledigt markieren' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Bankdrücken: nächstes Mal Gewicht steigern' })).toBeChecked()
+    await user.click(screen.getByRole('button', { name: 'Training beenden' }))
+    await user.click(within(screen.getByRole('dialog', { name: 'Training beenden' })).getByRole('button', { name: 'Training beenden' }))
+    expect((onChange.mock.calls[0]![0] as AppData).gymSessions[0]?.exercises[0]).toMatchObject({ completed: true, increaseNextTime: true })
+  })
+
+  it('zeigt die letzte stabile Steigerungsvormerkung genau im Folgetraining und entscheidet danach neu', async () => {
+    const user = userEvent.setup()
+    const data = withPushExercise()
+    const previous = session('previous', '2026-08-20')
+    previous.exercises[0] = { ...previous.exercises[0]!, increaseNextTime: true }
+    const unrelatedLater = session('unrelated', '2026-08-21')
+    unrelatedLater.exercises[0] = { ...unrelatedLater.exercises[0]!, templateExerciseId: 'other-exercise', increaseNextTime: true }
+    data.gymSessions = [unrelatedLater, previous]
+    render(<Harness initial={data} />)
+
+    await user.click(screen.getByRole('button', { name: 'Push starten' }))
+    await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    expect(screen.getByRole('status')).toHaveTextContent('Gewicht steigern')
+    expect(screen.getByRole('checkbox', { name: 'Bankdrücken: nächstes Mal Gewicht steigern' })).not.toBeChecked()
+    await user.click(screen.getByRole('button', { name: 'Training beenden' }))
+    await user.click(within(screen.getByRole('dialog', { name: 'Training beenden' })).getByRole('button', { name: 'Training beenden' }))
+
+    await user.click(screen.getByRole('button', { name: 'Push starten' }))
+    await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('lässt eine ältere Vormerkung nicht erneut aufleben, wenn die jüngste passende Session sie nicht setzt', async () => {
+    const user = userEvent.setup()
+    const data = withPushExercise()
+    const older = session('older', '2026-08-19')
+    older.exercises[0] = { ...older.exercises[0]!, increaseNextTime: true }
+    const latest = session('latest', '2026-08-20')
+    data.gymSessions = [older, latest]
+    render(<Harness initial={data} />)
+    await user.click(screen.getByRole('button', { name: 'Push starten' }))
+    await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('nutzt Gewicht und Progression templateübergreifend über die kanonische Übungs-ID', async () => {
+    const user = userEvent.setup()
+    const data = withPushExercise()
+    data.gymExercises = [{ id: 'canonical-bench', name: 'Bankdrücken', createdAt: '2026-08-01T10:00:00Z', updatedAt: '2026-08-01T10:00:00Z' }]
+    data.gymTemplates[0]!.exercises[0] = { ...data.gymTemplates[0]!.exercises[0]!, exerciseId: 'canonical-bench', sets: 3, targetReps: 8, targetRepsMax: 12 }
+    data.gymTemplates[1]!.exercises = [{ id: 'pull-bench-row', exerciseId: 'canonical-bench', name: 'Bankdrücken', sets: 4, targetReps: 5, position: 0 }]
+    const pullHistory = session('pull-history', '2026-08-20', 'Pull')
+    pullHistory.templateId = data.gymTemplates[1]!.id
+    pullHistory.exercises[0] = {
+      ...pullHistory.exercises[0]!, templateExerciseId: 'pull-bench-row', exerciseId: 'canonical-bench', sets: 4, reps: 5, increaseNextTime: true,
+      performedSets: [1, 2, 3, 4].map((setNumber) => ({ id: `pull-${setNumber}`, setNumber, weightKg: 90 + setNumber, reps: 5 })),
+    }
+    data.gymSessions = [pullHistory]
+    render(<Harness initial={data} />)
+
+    await user.click(screen.getByRole('button', { name: 'Push starten' }))
+    await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    expect(screen.getAllByRole('textbox', { name: /Bankdrücken Satz \d Gewicht/ }).map((input) => (input as HTMLInputElement).value)).toEqual(['91', '92', '93'])
+    expect(screen.getByRole('button', { name: /3 Sätze.*8–12 Wdh/ })).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Gewicht steigern')
+    expect(screen.queryByRole('textbox', { name: 'Bankdrücken Satz 4 Gewicht' })).not.toBeInTheDocument()
+  })
+
+  it('zeigt die Bibliothek als GYM-Unterseite und merged auch unterschiedlich benannte Übungen erst nach Dialogbestätigung', async () => {
+    const user = userEvent.setup()
+    const data = withPushExercise()
+    const timestamp = '2026-08-01T10:00:00Z'
+    data.gymExercises = [
+      { id: 'curl-a', name: 'Bizeps Curls', createdAt: timestamp, updatedAt: timestamp },
+      { id: 'curl-b', name: 'Bizeps Curls', createdAt: timestamp, updatedAt: timestamp },
+      { id: 'pushdown', name: 'Trizeps Pushdowns', createdAt: timestamp, updatedAt: timestamp },
+    ]
+    data.gymTemplates[0]!.exercises[0] = { ...data.gymTemplates[0]!.exercises[0]!, exerciseId: 'curl-a', name: 'Bizeps Curls' }
+    data.gymTemplates[1]!.exercises = [{ id: 'curl-row-b', exerciseId: 'curl-b', name: 'Bizeps Curls', sets: 4, targetReps: 12, position: 0 }]
+    data.gymTemplates[2]!.exercises = [{ id: 'pushdown-row', exerciseId: 'pushdown', name: 'Trizeps Pushdowns', sets: 3, targetReps: 10, position: 0 }]
+    render(<Harness initial={data} />)
+
+    await user.click(screen.getByRole('button', { name: 'Einheiten verwalten' }))
+    await user.click(screen.getByRole('button', { name: 'Übungsbibliothek' }))
+    expect(screen.getByRole('heading', { name: 'Bibliothek' })).toBeInTheDocument()
+    expect(screen.getByText(/Namensgleiche Übungen gefunden/)).toBeInTheDocument()
+    const connect = screen.getAllByRole('button', { name: 'Trizeps Pushdowns mit anderer Übung verbinden' })[0]!
+    await user.click(connect)
+    let dialog = screen.getByRole('dialog', { name: /Trizeps Pushdowns.*zusammenführen/ })
+    expect(within(dialog).getByRole('button', { name: 'Endgültig verbinden' })).toHaveFocus()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: /Trizeps Pushdowns.*zusammenführen/ })).not.toBeInTheDocument()
+    expect(connect).toHaveFocus()
+    await user.click(connect)
+    dialog = screen.getByRole('dialog', { name: /Trizeps Pushdowns.*zusammenführen/ })
+    expect(dialog).toHaveTextContent('historische Einträge bleiben erhalten')
+    expect(dialog).toHaveTextContent('nicht rückgängig gemacht oder wieder getrennt')
+    await user.selectOptions(within(dialog).getByRole('combobox', { name: 'Zielübung' }), 'curl-a')
+    await user.click(within(dialog).getByRole('button', { name: 'Endgültig verbinden' }))
+    expect(screen.queryByText('Trizeps Pushdowns')).not.toBeInTheDocument()
+    expect(screen.getAllByText('Bizeps Curls').length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('erklärt im Merge-Dialog verständlich, wenn alle Ziele schon im selben Plan liegen', async () => {
+    const user = userEvent.setup()
+    const data = withPushExercise()
+    const timestamp = '2026-08-01T10:00:00Z'
+    data.gymExercises = [
+      { id: 'same-a', name: 'Curl A', createdAt: timestamp, updatedAt: timestamp },
+      { id: 'same-b', name: 'Curl B', createdAt: timestamp, updatedAt: timestamp },
+    ]
+    data.gymTemplates[0]!.exercises = [
+      { id: 'same-row-a', exerciseId: 'same-a', name: 'Curl A', sets: 3, targetReps: 10, position: 0 },
+      { id: 'same-row-b', exerciseId: 'same-b', name: 'Curl B', sets: 3, targetReps: 10, position: 1 },
+    ]
+    render(<Harness initial={data} />)
+    await user.click(screen.getByRole('button', { name: 'Einheiten verwalten' }))
+    await user.click(screen.getByRole('button', { name: 'Übungsbibliothek' }))
+    await user.click(screen.getByRole('button', { name: 'Curl A mit anderer Übung verbinden' }))
+    const dialog = screen.getByRole('dialog', { name: /Curl A.*zusammenführen/ })
+    expect(dialog).toHaveTextContent('Keine zulässige Zielübung verfügbar')
+    expect(within(dialog).getByRole('button', { name: 'Schließen' })).toHaveFocus()
+    expect(within(dialog).getByRole('combobox', { name: 'Zielübung' })).toBeDisabled()
+    expect(within(dialog).getByRole('button', { name: 'Endgültig verbinden' })).toBeDisabled()
+  })
+
+  it('übergibt auch einen verwaisten Bibliotheks-Merge als explizite Mutation', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const data = withPushExercise()
+    const timestamp = '2026-08-01T10:00:00Z'
+    data.gymExercises = [
+      { id: 'orphan-source', name: 'Alt', createdAt: timestamp, updatedAt: timestamp },
+      { id: 'orphan-target', name: 'Neu', createdAt: timestamp, updatedAt: timestamp },
+    ]
+    data.gymTemplates.forEach((template) => { template.exercises = [] })
+    render(<GymView data={data} onChange={onChange} />)
+    await user.click(screen.getByRole('button', { name: 'Einheiten verwalten' }))
+    await user.click(screen.getByRole('button', { name: 'Übungsbibliothek' }))
+    await user.click(screen.getByRole('button', { name: 'Alt mit anderer Übung verbinden' }))
+    await user.click(screen.getByRole('button', { name: 'Endgültig verbinden' }))
+    expect(onChange.mock.calls[0]![1]).toEqual([{ kind: 'gym.exercise.merge', sourceExerciseId: 'orphan-source', targetExerciseId: 'orphan-target', expectedSourceName: 'Alt', expectedTargetName: 'Neu' }])
+  })
+
+  it('fragt bei einer neuen namensgleichen Übung und verlinkt niemals automatisch', async () => {
+    const user = userEvent.setup()
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const onChange = vi.fn()
+    const data = withPushExercise()
+    const timestamp = '2026-08-01T10:00:00Z'
+    data.gymTemplates[0]!.exercises[0]!.exerciseId = 'canonical-bench'
+    data.gymExercises = [{ id: 'canonical-bench', name: 'Bankdrücken', createdAt: timestamp, updatedAt: timestamp }]
+    render(<GymView data={data} onChange={onChange} />)
+    await user.click(screen.getByRole('button', { name: 'Pull bearbeiten' }))
+    await user.click(screen.getByRole('button', { name: 'Übung hinzufügen' }))
+    await user.type(screen.getByRole('textbox', { name: 'Name' }), 'Bankdrücken')
+    await user.click(screen.getByRole('button', { name: 'Einheit speichern' }))
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Bestehende Übung verwenden'))
+    const changed = onChange.mock.calls[0]![0] as AppData
+    const pullExercise = changed.gymTemplates.find((template) => template.name === 'Pull')!.exercises[0]!
+    expect(pullExercise.exerciseId).not.toBe('canonical-bench')
+    expect(changed.gymExercises).toHaveLength(2)
   })
 })

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createInitialData, isAppData, isBodyMetric, legacyGymSetId, loadData, saveData, setEntryStatus, STORAGE_KEY } from './storage'
+import { createInitialData, isAppData, isBodyMetric, isGymSession, isGymTemplate, legacyGymSetId, loadData, saveData, setEntryStatus, STORAGE_KEY } from './storage'
 
 function memoryStorage(initial?: string) {
   let value = initial ?? null
@@ -129,5 +129,23 @@ describe('Storage-Layer', () => {
     expect(ids).toEqual([legacyGymSetId(first, 1), legacyGymSetId(first, 2), legacyGymSetId(second, 1)])
     expect(new Set(ids).size).toBe(ids.length)
     expect(ids.every((id) => id.length <= 100 && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(id))).toBe(true)
+  })
+
+  it('validiert Wiederholungsbereiche und optionale Session-Fortschrittsfelder rückwärtskompatibel', () => {
+    const timestamp = '2026-08-01T10:00:00Z'
+    const template = { id: 'push', name: 'Push', createdAt: timestamp, updatedAt: timestamp, exercises: [
+      { id: 'bench', name: 'Bankdrücken', sets: 3, targetReps: 8, targetRepsMax: 12, position: 0 },
+    ] }
+    expect(isGymTemplate(template)).toBe(true)
+    expect(isGymTemplate({ ...template, exercises: [{ ...template.exercises[0], targetRepsMax: 7 }] })).toBe(false)
+    expect(isGymTemplate({ ...template, exercises: [{ ...template.exercises[0], targetRepsMax: 101 }] })).toBe(false)
+
+    const session = { id: 'session', templateName: 'Push', date: '2026-08-01', startedAt: timestamp, completedAt: '2026-08-01T11:00:00Z', exercises: [
+      { id: 'session-bench', templateExerciseId: 'bench', name: 'Bankdrücken', sets: 3, reps: 9, targetReps: 8, targetRepsMax: 12, increaseNextTime: true, completed: true, position: 0 },
+    ] }
+    expect(isGymSession(session)).toBe(true)
+    expect(isGymSession({ ...session, exercises: [{ ...session.exercises[0], increaseNextTime: 'ja' }] })).toBe(false)
+    const legacyExercise = { id: 'legacy-bench', templateExerciseId: 'bench', name: 'Bankdrücken', sets: 3, reps: 9, position: 0 }
+    expect(isGymSession({ ...session, exercises: [legacyExercise] })).toBe(true)
   })
 })

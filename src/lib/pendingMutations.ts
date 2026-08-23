@@ -35,6 +35,11 @@ export function isDataMutation(value: unknown): value is DataMutation {
   if (value.kind === 'gym.template.delete') return isIdentifier(value.templateId)
   if (value.kind === 'gym.session.complete') return isGymSession(value.session)
   if (value.kind === 'gym.session.delete') return isIdentifier(value.sessionId)
+  if (value.kind === 'gym.exercise.merge') return isIdentifier(value.sourceExerciseId) && isIdentifier(value.targetExerciseId) && value.sourceExerciseId !== value.targetExerciseId &&
+    typeof value.expectedSourceName === 'string' && value.expectedSourceName.trim().length > 0 && typeof value.expectedTargetName === 'string' && value.expectedTargetName.trim().length > 0
+  if (value.kind === 'gym.exercise.rename') return isIdentifier(value.exerciseId) && typeof value.expectedName === 'string' && value.expectedName.trim().length > 0 &&
+    typeof value.expectedUpdatedAt === 'string' && !Number.isNaN(Date.parse(value.expectedUpdatedAt)) && typeof value.name === 'string' && value.name.trim().length > 0 && value.name.trim().length <= 80
+    && typeof value.updatedAt === 'string' && !Number.isNaN(Date.parse(value.updatedAt))
   if (value.kind === 'entry.set') return isEntry(value.entry) || isOpenEntry(value.entry)
   return false
 }
@@ -114,6 +119,27 @@ export function applyPendingMutations(data: AppData, mutations: PendingMutation[
         : [...current.gymSessions, mutation.session],
     }
     if (mutation.kind === 'gym.session.delete') return { ...current, gymSessions: current.gymSessions.filter((session) => session.id !== mutation.sessionId) }
+    if (mutation.kind === 'gym.exercise.merge') {
+      const target = current.gymExercises?.find((exercise) => exercise.id === mutation.targetExerciseId)
+      if (!target) return current
+      return {
+        ...current,
+        gymExercises: current.gymExercises?.filter((exercise) => exercise.id !== mutation.sourceExerciseId),
+        gymTemplates: current.gymTemplates.map((template) => ({ ...template, exercises: template.exercises.map((exercise) => exercise.exerciseId === mutation.sourceExerciseId ? { ...exercise, exerciseId: target.id, name: target.name } : exercise) })),
+        gymSessions: current.gymSessions.map((session) => ({ ...session, exercises: session.exercises.map((exercise) => exercise.exerciseId === mutation.sourceExerciseId ? { ...exercise, exerciseId: target.id, name: target.name } : exercise) })),
+      }
+    }
+    if (mutation.kind === 'gym.exercise.rename') {
+      const currentExercise = current.gymExercises?.find((exercise) => exercise.id === mutation.exerciseId)
+      if (!currentExercise || currentExercise.name !== mutation.expectedName || currentExercise.updatedAt !== mutation.expectedUpdatedAt) return current
+      const name = mutation.name.trim()
+      return {
+        ...current,
+        gymExercises: current.gymExercises?.map((exercise) => exercise.id === mutation.exerciseId ? { ...exercise, name, updatedAt: mutation.updatedAt } : exercise),
+        gymTemplates: current.gymTemplates.map((template) => ({ ...template, exercises: template.exercises.map((exercise) => exercise.exerciseId === mutation.exerciseId ? { ...exercise, name } : exercise) })),
+        gymSessions: current.gymSessions.map((session) => ({ ...session, exercises: session.exercises.map((exercise) => exercise.exerciseId === mutation.exerciseId ? { ...exercise, name } : exercise) })),
+      }
+    }
 
     const entries = current.entries.filter((entry) => !(entry.goalId === mutation.entry.goalId && entry.date === mutation.entry.date))
     return mutation.entry.status === 'open' ? { ...current, entries } : { ...current, entries: [...entries, mutation.entry] }

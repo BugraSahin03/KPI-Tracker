@@ -11,9 +11,10 @@ Pace ist eine mobile-first PWA zum schnellen Erfassen und Auswerten täglicher S
 - Kalender als ISO-Woche, Monat und Jahres-Heatmap
 - Insights für Woche, Monat und Jahr: Quote, aktuelle/beste Serie und Zielquoten
 - Körperwerte für Gewicht und manuell gepflegte Muskelmasse
-- GYM-Tracker mit frei pflegbaren Einheiten, geordneten Übungen und Trainingshistorie
+- GYM-Tracker mit frei pflegbaren Einheiten, Wiederholungsranges, satzgenauen Gewichten und Trainingshistorie
+- Profilbezogene Übungsbibliothek für templateübergreifenden Fortschritt; gleichnamige Übungen bleiben zunächst getrennt und können ausschließlich nach ausdrücklicher Bestätigung verbunden werden
 - Push, Pull und Beine starten bei einer frischen Datenbank bewusst als leere Vorlagen, damit keine unpassenden Gewichte vorgegeben werden
-- Vor dem Abschluss lassen sich Gewicht, Sätze und Wiederholungen je Übung anpassen; historische Sessions bleiben als Snapshot stabil
+- Vor dem Abschluss lassen sich Gewicht und Wiederholungen je Satz anpassen; historische Sessions bleiben erhalten und liefern die Gewichte für das nächste Training
 - Automatischer Import von Gewicht und Körperfett über Google Health API v4 (vorbereitet, standardmäßig ausgeschaltet)
 - Serverseitige SQLite-Datenbank mit Revisionen und sicheren Migrationen
 - Installierbare PWA; aktuell bewusst kein Offline-Datensync
@@ -56,6 +57,8 @@ Der Produktions-Build liegt anschließend in `dist/`, das eigenständig ausführ
 - `server/db.ts` – SQLite-Zugriff, atomare Einzelmutationen, Receipts und Deduplizierung
 - `server/google-health.ts` – OAuth, Token-Erneuerung und 15-Minuten-Polling
 - `server/migrations/` – versioniertes Datenbankschema
+
+Die Übungsbibliothek bietet bewusst kein nachträgliches „Trennen“ einer bereits verbundenen Übung an: Ein solches Trennen müsste festlegen, welcher Teil der gemeinsamen Historie rückwirkend zu welcher neuen Identität gehört. Neue namensgleiche Übungen können beim Anlegen weiterhin ausdrücklich getrennt erstellt werden; ein späteres Unlinking folgt erst mit einem eigenen, historisch eindeutigen Workflow.
 
 ## Bestehende Browserdaten
 

@@ -125,7 +125,7 @@ export function createApp(database: PaceDatabase, googleHealth: GoogleHealthServ
     if (error instanceof SyntaxError && 'body' in error) return response.status(400).json({ error: 'Ungültiges JSON.' })
     if (error.code === 'PROFILE_NOT_FOUND') return response.status(404).json({ error: error.message })
     if (error.code === 'IMPORT_PROFILE_FORBIDDEN' || error.code === 'DATA_INTEGRITY') return response.status(400).json({ error: error.message })
-    if (error.code === 'REVISION_CONFLICT' || error.code === 'IMPORT_CONFLICT') return response.status(409).json({ error: error.message })
+    if (error.code === 'REVISION_CONFLICT' || error.code === 'IMPORT_CONFLICT' || error.code === 'GYM_EXERCISE_CONFLICT') return response.status(409).json({ error: error.message })
     if (error.name === 'SqliteError' && ['SQLITE_CONSTRAINT_FOREIGNKEY', 'SQLITE_CONSTRAINT_UNIQUE'].includes(error.code ?? '')) {
       return response.status(400).json({ error: 'Mutation verletzt die Datenintegrität.' })
     }
@@ -177,6 +177,11 @@ function isDataMutation(value: unknown): value is DataMutation {
   if (mutation.kind === 'gym.template.delete') return validId(mutation.templateId)
   if (mutation.kind === 'gym.session.complete') return isGymSession(mutation.session)
   if (mutation.kind === 'gym.session.delete') return validId(mutation.sessionId)
+  if (mutation.kind === 'gym.exercise.merge') return validId(mutation.sourceExerciseId) && validId(mutation.targetExerciseId) && mutation.sourceExerciseId !== mutation.targetExerciseId &&
+    typeof mutation.expectedSourceName === 'string' && mutation.expectedSourceName.trim().length > 0 && typeof mutation.expectedTargetName === 'string' && mutation.expectedTargetName.trim().length > 0
+  if (mutation.kind === 'gym.exercise.rename') return validId(mutation.exerciseId) && typeof mutation.expectedName === 'string' && mutation.expectedName.trim().length > 0 &&
+    typeof mutation.expectedUpdatedAt === 'string' && !Number.isNaN(Date.parse(mutation.expectedUpdatedAt)) && typeof mutation.name === 'string' && mutation.name.trim().length > 0 && mutation.name.trim().length <= 80 &&
+    typeof mutation.updatedAt === 'string' && !Number.isNaN(Date.parse(mutation.updatedAt))
   if (mutation.kind === 'entry.set') {
     const entry = mutation.entry as Record<string, unknown> | undefined
     if (entry?.status === 'open') return validId(entry.goalId) && typeof entry.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(entry.date) && typeof entry.updatedAt === 'string' && !Number.isNaN(Date.parse(entry.updatedAt))

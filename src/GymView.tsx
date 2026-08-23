@@ -1,14 +1,18 @@
-import { ArrowLeft, ArrowRight, Check, ChevronDown, ChevronUp, Dumbbell, Eye, Pencil, Plus, Trash2, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, BookOpen, Check, ChevronDown, ChevronUp, Dumbbell, Eye, Link2, Pencil, Plus, TrendingUp, Trash2, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { formatShortDate, todayKey } from './lib/date'
 import { formatDecimalInput, parseDecimalInput } from './lib/decimal'
+import { formatRepTarget, parseRepTarget } from './lib/reps'
 import { isGymSession, legacyGymSetId, makeId } from './lib/storage'
-import type { AppData, GymSession, GymSessionExercise, GymSessionSet, GymTemplate, GymTemplateExercise } from './types'
+import type { AppData, DataMutation, GymExercise, GymSession, GymSessionExercise, GymSessionSet, GymTemplate, GymTemplateExercise } from './types'
+
+type WithoutMutationId<T> = T extends { id: string } ? Omit<T, 'id'> : never
+export type GymMutationIntent = WithoutMutationId<Extract<DataMutation, { kind: 'gym.template.upsert' | 'gym.exercise.merge' | 'gym.exercise.rename' }>>
 
 type GymViewProps = {
   data: AppData
-  onChange: (data: AppData) => boolean | void
+  onChange: (data: AppData, mutations?: GymMutationIntent[]) => boolean | void
   draftStorageKey?: string
   onEditorDirtyChange?: (dirty: boolean) => void
 }
@@ -19,8 +23,10 @@ type ExerciseDraft = {
   id: string
   name: string
   sets: string
-  weight: string
   reps: string
+  /** Preserved invisibly for existing pre-history exercises; never set for new exercises. */
+  legacyWeightKg?: number
+  exerciseId?: string
 }
 
 function exerciseDraft(exercise?: GymTemplateExercise): ExerciseDraft {
@@ -28,13 +34,16 @@ function exerciseDraft(exercise?: GymTemplateExercise): ExerciseDraft {
     id: exercise?.id ?? makeId('gym-exercise'),
     name: exercise?.name ?? '',
     sets: String(exercise?.sets ?? 3),
-    weight: exercise?.targetWeightKg === undefined ? '' : String(exercise.targetWeightKg),
-    reps: String(exercise?.targetReps ?? 10),
+    reps: formatRepTarget(exercise?.targetReps ?? 10, exercise?.targetRepsMax),
+    ...(exercise?.targetWeightKg === undefined ? {} : { legacyWeightKg: exercise.targetWeightKg }),
+    ...(exercise?.exerciseId === undefined ? {} : { exerciseId: exercise.exerciseId }),
   }
 }
 
-function TemplateEditor({ template, onSave, onCancel, onDirtyChange }: {
+function TemplateEditor({ template, library, templates, onSave, onCancel, onDirtyChange }: {
   template?: GymTemplate
+  library: GymExercise[]
+  templates: GymTemplate[]
   onSave: (template: GymTemplate) => void
   onCancel: () => void
   onDirtyChange?: (dirty: boolean) => void
@@ -45,7 +54,7 @@ function TemplateEditor({ template, onSave, onCancel, onDirtyChange }: {
   )
   const [initialForm] = useState(() => ({
     name: template?.name ?? '',
-    exercises: template?.exercises.map(exerciseDraft) ?? [exerciseDraft()],
+    exercises: template?.exercises.map((exercise) => exerciseDraft({ ...exercise, exerciseId: exercise.exerciseId ?? library.find((item) => item.id === exercise.id)?.id })) ?? [exerciseDraft()],
   }))
   const [name, setName] = useState(initialForm.name)
   const [exercises, setExercises] = useState<ExerciseDraft[]>(initialForm.exercises)
@@ -115,27 +124,46 @@ function TemplateEditor({ template, onSave, onCancel, onDirtyChange }: {
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
-    if (exercises.some((exercise) => exercise.weight !== '' && parseDecimalInput(exercise.weight) === undefined)) {
-      setFormError('Bitte prüfe das Gewicht – Komma und Punkt sind möglich.')
+    if (exercises.some((exercise) => !parseRepTarget(exercise.reps))) {
+      setFormError('Wiederholungen bitte als Zahl oder Bereich eingeben, z. B. 8–12.')
       return
     }
+    for (const exercise of exercises) {
+      const canonical = exercise.exerciseId ? library.find((item) => item.id === exercise.exerciseId) : undefined
+      if (!canonical || canonical.name === exercise.name.trim()) continue
+      const uses = templates.filter((item) => item.exercises.some((candidate) => candidate.exerciseId === exercise.exerciseId)).map((item) => item.name)
+      if (uses.length > 0 && !window.confirm(`„${canonical.name}“ ist eine globale Übung in ${uses.join(', ')}. Wirklich überall in „${exercise.name.trim()}“ umbenennen? Auch die verknüpfte Historie wird künftig unter diesem Namen angezeigt.`)) return
+    }
     const now = new Date().toISOString()
-    const normalized: GymTemplateExercise[] = exercises.map((exercise, position) => ({
-      id: exercise.id,
-      name: exercise.name.trim(),
-      sets: Number(exercise.sets),
-      ...(exercise.weight === '' ? {} : { targetWeightKg: parseDecimalInput(exercise.weight) as number }),
-      targetReps: Number(exercise.reps),
-      position,
-    }))
+    const normalized: GymTemplateExercise[] = exercises.map((exercise, position) => {
+      const target = parseRepTarget(exercise.reps)!
+      let exerciseId = exercise.exerciseId
+      if (!exerciseId) {
+        const normalizedName = normalizeExerciseName(exercise.name)
+        const duplicate = library.find((item) => normalizeExerciseName(item.name) === normalizedName)
+        exerciseId = duplicate && window.confirm(`„${duplicate.name}“ existiert bereits. Bestehende Übung verwenden?\n\nOK: verbinden · Abbrechen: getrennt anlegen`)
+          ? duplicate.id
+          : makeId('gym-exercise-library')
+      }
+      return {
+        id: exercise.id,
+        exerciseId,
+        name: exercise.name.trim(),
+        sets: Number(exercise.sets),
+        ...(exercise.legacyWeightKg === undefined ? {} : { targetWeightKg: exercise.legacyWeightKg }),
+        targetReps: target.min,
+        ...(target.max === undefined ? {} : { targetRepsMax: target.max }),
+        position,
+      }
+    })
     const normalizedNames = normalized.map((exercise) => exercise.name.toLocaleLowerCase('de-DE'))
     if (!name.trim() || normalized.some((exercise) => !exercise.name)) return
     if (new Set(normalizedNames).size !== normalizedNames.length) {
       setFormError('Jede Übung darf pro Einheit nur einmal vorkommen.')
       return
     }
-    if (normalized.some((exercise) => !Number.isInteger(exercise.sets) || exercise.sets < 1 || exercise.sets > 20 || !Number.isInteger(exercise.targetReps) || exercise.targetReps < 1 || exercise.targetReps > 100 || (exercise.targetWeightKg !== undefined && (!Number.isFinite(exercise.targetWeightKg) || exercise.targetWeightKg < 0 || exercise.targetWeightKg > 1000)))) {
-      setFormError('Bitte prüfe Sätze, Gewicht und Wiederholungen.')
+    if (normalized.some((exercise) => !Number.isInteger(exercise.sets) || exercise.sets < 1 || exercise.sets > 20 || !Number.isInteger(exercise.targetReps) || exercise.targetReps < 1 || exercise.targetReps > 100 || (exercise.targetRepsMax !== undefined && exercise.targetRepsMax < exercise.targetReps))) {
+      setFormError('Bitte prüfe Sätze und Wiederholungen.')
       return
     }
     onSave({
@@ -177,8 +205,10 @@ function TemplateEditor({ template, onSave, onCancel, onDirtyChange }: {
                 <label className="gym-name-field"><span>Name</span><input required maxLength={80} value={exercise.name} onChange={(event) => setExercises(exercises.map((item) => item.id === exercise.id ? { ...item, name: event.target.value } : item))} placeholder="Bankdrücken" /></label>
                 <div className="gym-number-row">
                   <label><span>Sätze</span><input required type="number" inputMode="numeric" min="1" max="20" value={exercise.sets} onChange={(event) => setExercises(exercises.map((item) => item.id === exercise.id ? { ...item, sets: event.target.value } : item))} /></label>
-                  <label><span>kg</span><input type="text" inputMode="decimal" autoComplete="off" value={exercise.weight} onChange={(event) => setExercises(exercises.map((item) => item.id === exercise.id ? { ...item, weight: event.target.value } : item))} placeholder="BW" /></label>
-                  <label><span>Wdh.</span><input required type="number" inputMode="numeric" min="1" max="100" value={exercise.reps} onChange={(event) => setExercises(exercises.map((item) => item.id === exercise.id ? { ...item, reps: event.target.value } : item))} /></label>
+                  <label><span>Wdh.</span><input required type="text" inputMode="text" autoComplete="off" value={exercise.reps} aria-label={`${exercise.name || `Übung ${index + 1}`} Wiederholungsvorgabe`} placeholder="8–12" onChange={(event) => setExercises(exercises.map((item) => item.id === exercise.id ? { ...item, reps: event.target.value } : item))} onBlur={() => {
+                    const target = parseRepTarget(exercise.reps)
+                    if (target) setExercises((current) => current.map((item) => item.id === exercise.id ? { ...item, reps: formatRepTarget(target.min, target.max) } : item))
+                  }} /></label>
                 </div>
               </fieldset>
             ))}
@@ -275,14 +305,34 @@ function loadGymDraft(storageKey: string): GymSession | null {
   }
 }
 
+function historicalSetsByNumber(exercise: GymSessionExercise) {
+  if (exercise.performedSets === undefined) {
+    return new Map(Array.from({ length: exercise.sets }, (_, index) => {
+      const setNumber = index + 1
+      return [setNumber, {
+        id: legacyGymSetId(exercise.id, setNumber), setNumber,
+        ...(exercise.weightKg === undefined ? {} : { weightKg: exercise.weightKg }),
+        reps: exercise.reps,
+      } satisfies GymSessionSet] as const
+    }))
+  }
+  const normalized = new Map<number, GymSessionSet>()
+  const candidates = [...exercise.performedSets].sort((a, b) => a.setNumber - b.setNumber || a.id.localeCompare(b.id))
+  for (const set of candidates) {
+    if (!Number.isInteger(set.setNumber) || set.setNumber < 1 || set.setNumber > exercise.sets || normalized.has(set.setNumber)) continue
+    normalized.set(set.setNumber, set)
+  }
+  return normalized
+}
+
 function setsForExercise(exercise: GymSessionExercise): GymSessionSet[] {
-  if (exercise.performedSets?.length === exercise.sets) return exercise.performedSets
-  return Array.from({ length: exercise.sets }, (_, index) => ({
-    id: legacyGymSetId(exercise.id, index + 1),
-    setNumber: index + 1,
-    ...(exercise.weightKg === undefined ? {} : { weightKg: exercise.weightKg }),
-    reps: exercise.reps,
-  }))
+  const recorded = historicalSetsByNumber(exercise)
+  return Array.from({ length: exercise.sets }, (_, index) => {
+    const setNumber = index + 1
+    return recorded.get(setNumber) ?? {
+      id: legacyGymSetId(exercise.id, setNumber), setNumber, reps: exercise.reps,
+    }
+  })
 }
 
 function sessionWithIndividualSets(session: GymSession): GymSession {
@@ -320,7 +370,93 @@ function validDraftExercise(exercise: GymSessionExercise, weightInputs: Record<s
       validSetRepsInput(repsInputs[set.id] ?? String(set.reps)))
 }
 
+function plannedReps(exercise: GymSessionExercise) {
+  return formatRepTarget(exercise.targetReps ?? exercise.reps, exercise.targetRepsMax)
+}
+
+function normalizeExerciseName(name: string) {
+  return name.trim().replace(/\s+/g, ' ').toLocaleLowerCase('de-DE')
+}
+
+function latestExercisesByTemplateId(sessions: GymSession[], before: string) {
+  const previous = new Map<string, GymSessionExercise>()
+  const candidates = sessions
+    .filter((session) => Date.parse(session.completedAt) < Date.parse(before))
+    .sort((a, b) => Date.parse(b.completedAt) - Date.parse(a.completedAt) || b.date.localeCompare(a.date) || b.startedAt.localeCompare(a.startedAt) || b.id.localeCompare(a.id))
+  for (const session of candidates) {
+    for (const exercise of session.exercises) {
+      const exerciseId = exercise.exerciseId ?? exercise.templateExerciseId
+      if (exerciseId && !previous.has(exerciseId)) previous.set(exerciseId, exercise)
+    }
+  }
+  return previous
+}
+
+function MergeExerciseDialog({ source, library, templates, sessions, onConfirm, onCancel }: {
+  source: GymExercise
+  library: GymExercise[]
+  templates: GymTemplate[]
+  sessions: GymSession[]
+  onConfirm: (targetId: string) => void
+  onCancel: () => void
+}) {
+  const targets = library.filter((exercise) => exercise.id !== source.id && !templates.some((template) => {
+    const ids = new Set(template.exercises.map((item) => item.exerciseId))
+    return ids.has(source.id) && ids.has(exercise.id)
+  }))
+  const hasTargets = targets.length > 0
+  const [targetId, setTargetId] = useState(targets[0]?.id ?? '')
+  const target = targets.find((exercise) => exercise.id === targetId)
+  const sourcePlans = templates.filter((template) => template.exercises.some((exercise) => exercise.exerciseId === source.id)).map((template) => template.name)
+  const historyCount = sessions.reduce((count, session) => count + session.exercises.filter((exercise) => exercise.exerciseId === source.id).length, 0)
+  const confirmRef = useRef<HTMLButtonElement>(null)
+  const closeRef = useRef<HTMLButtonElement>(null)
+  const dialogRef = useRef<HTMLElement>(null)
+  const returnFocusRef = useRef<HTMLElement | null>(document.activeElement as HTMLElement | null)
+  useEffect(() => {
+    const returnFocus = returnFocusRef.current
+    ;(hasTargets ? confirmRef.current : closeRef.current)?.focus()
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); onCancel(); return }
+      if (event.key !== 'Tab' || !dialogRef.current) return
+      const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>('button:not([disabled]),select:not([disabled])'))
+      const first = focusable[0]
+      const last = focusable.at(-1)
+      if (!first || !last) return
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => { document.removeEventListener('keydown', handleKeyDown); returnFocus?.focus() }
+  }, [hasTargets, onCancel])
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onCancel()}>
+      <section ref={dialogRef} className="modal-sheet gym-library-merge" role="dialog" aria-modal="true" aria-labelledby="gym-merge-title" aria-describedby="gym-merge-impact">
+        <div className="modal-head"><div><p className="eyebrow">Übungen verbinden</p><h2 id="gym-merge-title">„{source.name}“ zusammenführen</h2></div><button ref={closeRef} type="button" className="mini-action" onClick={onCancel} aria-label="Schließen"><X /></button></div>
+        <label><span>Zielübung</span><select value={targetId} disabled={!targets.length} onChange={(event) => setTargetId(event.target.value)}>{targets.length ? targets.map((exercise) => <option key={exercise.id} value={exercise.id}>{exercise.name}</option>) : <option value="">Keine zulässige Zielübung</option>}</select></label>
+        {targets.length ? <p id="gym-merge-impact">Alle Verwendungen von „{source.name}“ werden auf „{target?.name ?? '–'}“ umgestellt. Betroffene Einheiten: {sourcePlans.length ? sourcePlans.join(', ') : 'keine'}. {historyCount} historische {historyCount === 1 ? 'Eintrag bleibt' : 'Einträge bleiben'} erhalten. Das Verbinden kann derzeit nicht rückgängig gemacht oder wieder getrennt werden.</p>
+          : <p id="gym-merge-impact">Keine zulässige Zielübung verfügbar. Alle anderen Übungen werden bereits gemeinsam mit „{source.name}“ in derselben Einheit verwendet und können deshalb nicht verbunden werden.</p>}
+        <button ref={confirmRef} type="button" className="primary-button full" disabled={!target} onClick={() => target && onConfirm(target.id)}><Link2 /> Endgültig verbinden</button>
+        <button type="button" className="link-button full" onClick={onCancel}>Abbrechen</button>
+      </section>
+    </div>, document.body,
+  )
+}
+
+function exerciseWeightSummary(exercise: GymSessionExercise) {
+  const weights = setsForExercise(exercise).map((set) => set.weightKg)
+  if (weights.every((weight) => weight === undefined)) return 'Gewicht offen'
+  const defined = weights.filter((weight): weight is number => weight !== undefined)
+  if (defined.length === weights.length && new Set(defined).size === 1) return `${defined[0]!.toLocaleString('de-DE')} kg`
+  const values = weights.map((weight) => weight === undefined ? '–' : weight.toLocaleString('de-DE'))
+  const compact = values.length <= 4 ? values.join(' / ') : `${values.slice(0, 3).join(' / ')} / …`
+  return `${compact} kg`
+}
+
 export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_STORAGE_KEY, onEditorDirtyChange }: GymViewProps) {
+  const library = useMemo<GymExercise[]>(() => data.gymExercises?.length ? data.gymExercises : data.gymTemplates.flatMap((template) => template.exercises.map((exercise) => ({
+    id: exercise.exerciseId ?? exercise.id, name: exercise.name, createdAt: template.createdAt, updatedAt: template.updatedAt,
+  }))), [data.gymExercises, data.gymTemplates])
   const initialDraft = useMemo(() => loadGymDraft(draftStorageKey), [draftStorageKey])
   const [draft, setDraft] = useState<GymSession | null>(() => initialDraft && sessionWithIndividualSets(initialDraft))
   const [setWeightInputs, setSetWeightInputs] = useState<Record<string, string>>(() => Object.fromEntries(
@@ -332,7 +468,8 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
   const [expandedExerciseIds, setExpandedExerciseIds] = useState<Set<string>>(() => loadExpandedExercises(draftStorageKey, initialDraft))
   const [editingTemplate, setEditingTemplate] = useState<GymTemplate | 'new' | null>(null)
   const [pendingTemplate, setPendingTemplate] = useState<GymTemplate | null>(null)
-  const [view, setView] = useState<'landing' | 'history' | 'manage'>('landing')
+  const [view, setView] = useState<'landing' | 'history' | 'manage' | 'library'>('landing')
+  const [mergeSourceId, setMergeSourceId] = useState<string | null>(null)
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null)
   const [finishRequested, setFinishRequested] = useState(false)
   const [isCompleting, setIsCompleting] = useState(false)
@@ -370,22 +507,37 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
     if (!pendingTemplate) return
     const startedAt = new Date().toISOString()
     const template = pendingTemplate
+    const previousByExercise = latestExercisesByTemplateId(data.gymSessions, startedAt)
     setPendingTemplate(null)
     const exercises = template.exercises.map((exercise): GymSessionExercise => {
       const id = makeId('gym-session-exercise')
+      const canonicalId = exercise.exerciseId ?? exercise.id
+      const previous = previousByExercise.get(canonicalId)
+      const previousSets = previous ? historicalSetsByNumber(previous) : undefined
+      const performedSets = Array.from({ length: exercise.sets }, (_, index): GymSessionSet => {
+        const previousSet = previousSets?.get(index + 1)
+        const weightKg = previous
+          ? previousSet?.weightKg
+          : exercise.targetWeightKg
+        return {
+          id: makeId('gym-session-set'), setNumber: index + 1,
+          ...(weightKg === undefined ? {} : { weightKg }),
+          reps: exercise.targetReps,
+        }
+      })
+      const firstWeight = performedSets[0]?.weightKg
       return {
         id,
         templateExerciseId: exercise.id,
+        exerciseId: canonicalId,
         name: exercise.name,
         sets: exercise.sets,
-        ...(exercise.targetWeightKg === undefined ? {} : { weightKg: exercise.targetWeightKg }),
+        ...(firstWeight === undefined ? {} : { weightKg: firstWeight }),
         reps: exercise.targetReps,
+        targetReps: exercise.targetReps,
+        ...(exercise.targetRepsMax === undefined ? {} : { targetRepsMax: exercise.targetRepsMax }),
         position: exercise.position,
-        performedSets: Array.from({ length: exercise.sets }, (_, index) => ({
-          id: makeId('gym-session-set'), setNumber: index + 1,
-          ...(exercise.targetWeightKg === undefined ? {} : { weightKg: exercise.targetWeightKg }),
-          reps: exercise.targetReps,
-        })),
+        performedSets,
       }
     })
     setSetWeightInputs(Object.fromEntries(exercises.flatMap((exercise) => setsForExercise(exercise).map((set) => [set.id, formatDecimalInput(set.weightKg)]))))
@@ -410,6 +562,11 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
       const first = performedSets[0]!
       return { ...exercise, performedSets, reps: first.reps, ...(first.weightKg === undefined ? { weightKg: undefined } : { weightKg: first.weightKg }) }
     }) })
+  }
+
+  const updateExercise = (exerciseId: string, values: Partial<GymSessionExercise>) => {
+    if (!draft) return
+    setDraft({ ...draft, exercises: draft.exercises.map((exercise) => exercise.id === exerciseId ? { ...exercise, ...values } : exercise) })
   }
 
   const complete = () => {
@@ -439,14 +596,43 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
   }
 
   const saveTemplate = (template: GymTemplate) => {
+    const now = new Date().toISOString()
+    const names = new Map(template.exercises.map((exercise) => [exercise.exerciseId!, exercise.name]))
+    const gymExercises = [...library]
+    const mutations: GymMutationIntent[] = []
+    for (const exercise of template.exercises) {
+      const index = gymExercises.findIndex((item) => item.id === exercise.exerciseId)
+      if (index >= 0) {
+        const existing = gymExercises[index]!
+        if (existing.name !== exercise.name) {
+          mutations.push({ kind: 'gym.exercise.rename', exerciseId: existing.id, expectedName: existing.name, expectedUpdatedAt: existing.updatedAt, name: exercise.name, updatedAt: now })
+          gymExercises[index] = { ...existing, name: exercise.name, updatedAt: now }
+        }
+      }
+      else gymExercises.push({ id: exercise.exerciseId!, name: exercise.name, createdAt: now, updatedAt: now })
+    }
+    const nextTemplate = { ...template, exercises: template.exercises.map((exercise) => ({ ...exercise, name: names.get(exercise.exerciseId!)! })) }
+    mutations.push({ kind: 'gym.template.upsert', template: nextTemplate })
     const accepted = onChange({
-      ...data,
+      ...data, gymExercises,
       gymTemplates: data.gymTemplates.some((item) => item.id === template.id)
-        ? data.gymTemplates.map((item) => item.id === template.id ? template : item)
-        : [...data.gymTemplates, template],
-    })
+        ? data.gymTemplates.map((item) => item.id === template.id ? nextTemplate : item)
+        : [...data.gymTemplates, nextTemplate],
+    }, mutations)
     if (accepted === false) return
     setEditingTemplate(null)
+  }
+  const mergeExercises = (sourceId: string, targetId: string) => {
+    const source = library.find((exercise) => exercise.id === sourceId)
+    const target = library.find((exercise) => exercise.id === targetId)
+    if (!source || !target) return
+    const next = {
+      ...data,
+      gymExercises: library.filter((exercise) => exercise.id !== sourceId),
+      gymTemplates: data.gymTemplates.map((template) => ({ ...template, exercises: template.exercises.map((exercise) => exercise.exerciseId === sourceId ? { ...exercise, exerciseId: targetId, name: target.name } : exercise) })),
+      gymSessions: data.gymSessions.map((session) => ({ ...session, exercises: session.exercises.map((exercise) => exercise.exerciseId === sourceId ? { ...exercise, exerciseId: targetId, name: target.name } : exercise) })),
+    }
+    if (onChange(next, [{ kind: 'gym.exercise.merge', sourceExerciseId: sourceId, targetExerciseId: targetId, expectedSourceName: source.name, expectedTargetName: target.name }]) !== false) setMergeSourceId(null)
   }
 
   const removeTemplate = (template: GymTemplate) => {
@@ -462,16 +648,7 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
   const sortedSessions = useMemo(() => [...data.gymSessions].sort((a, b) =>
     b.date.localeCompare(a.date) || b.completedAt.localeCompare(a.completedAt)), [data.gymSessions])
   const previousByTemplateExercise = useMemo(() => {
-    const previous = new Map<string, GymSessionExercise>()
-    const candidates = [...data.gymSessions]
-      .filter((session) => !draft || Date.parse(session.completedAt) < Date.parse(draft.startedAt))
-      .sort((a, b) => Date.parse(b.completedAt) - Date.parse(a.completedAt) || b.date.localeCompare(a.date))
-    for (const session of candidates) {
-      for (const exercise of session.exercises) {
-        if (exercise.templateExerciseId && !previous.has(exercise.templateExerciseId)) previous.set(exercise.templateExerciseId, exercise)
-      }
-    }
-    return previous
+    return latestExercisesByTemplateId([...data.gymSessions], draft?.startedAt ?? new Date().toISOString())
   }, [data.gymSessions, draft])
 
   const toggleExercise = (exerciseId: string) => {
@@ -538,7 +715,11 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
                         <div className="gym-history-exercise" key={exercise.id}>
                           <strong>{exercise.name}</strong>
                           <div className="gym-history-sets">
-                            {setsForExercise(exercise).map((set) => <span key={set.id}><b>Satz {set.setNumber}</b>{set.weightKg === undefined ? 'Körpergewicht' : `${set.weightKg.toLocaleString('de-DE')} kg`} · {set.reps} Wdh.</span>)}
+                            {Array.from({ length: exercise.sets }, (_, index) => {
+                              const setNumber = index + 1
+                              const set = historicalSetsByNumber(exercise).get(setNumber)
+                              return <span key={set?.id ?? legacyGymSetId(exercise.id, setNumber)}><b>Satz {setNumber}</b>{set ? <>{set.weightKg === undefined ? 'Nicht erfasst' : `${set.weightKg.toLocaleString('de-DE')} kg`} · {set.reps} Wdh.</> : 'Nicht erfasst'}</span>
+                            })}
                           </div>
                         </div>
                       ))}
@@ -560,6 +741,7 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
             <div><p className="eyebrow">Trainingspläne</p><h1 id="gym-manage-title">Einheiten</h1></div>
             <button type="button" className="round-action" onClick={() => setEditingTemplate('new')} aria-label="Einheit hinzufügen"><Plus /></button>
           </header>
+          <button type="button" className="outline-button full gym-library-open" onClick={() => setView('library')}><BookOpen /> Übungsbibliothek</button>
           <div className="gym-manage-list">
             {data.gymTemplates.map((template) => (
               <article className="gym-manage-card" key={template.id}>
@@ -574,21 +756,47 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
         </section>
       )}
 
+      {!draft && view === 'library' && (
+        <section className="gym-subview" aria-labelledby="gym-library-title">
+          <header className="gym-subview-head">
+            <button type="button" className="round-action" onClick={() => setView('manage')} aria-label="Zurück zu Einheiten"><ArrowLeft /></button>
+            <div><p className="eyebrow">Globale Übungen</p><h1 id="gym-library-title">Bibliothek</h1></div>
+            <span aria-hidden="true" />
+          </header>
+          {library.some((exercise, index) => library.findIndex((candidate) => normalizeExerciseName(candidate.name) === normalizeExerciseName(exercise.name)) !== index) && <p className="gym-duplicate-note"><Link2 /> Namensgleiche Übungen gefunden – verbinde sie nur, wenn sie wirklich dieselbe Übung sind.</p>}
+          <div className="gym-library-list">
+            {library.map((exercise) => {
+              const plans = data.gymTemplates.filter((template) => template.exercises.some((candidate) => (candidate.exerciseId ?? candidate.id) === exercise.id)).map((template) => template.name)
+              const duplicate = library.some((candidate) => candidate.id !== exercise.id && normalizeExerciseName(candidate.name) === normalizeExerciseName(exercise.name))
+              return <article className="gym-library-card" key={exercise.id}>
+                <div><strong>{exercise.name}</strong><small>{plans.length ? plans.join(' · ') : 'In keiner aktuellen Einheit'}{duplicate ? ' · Duplikat-Vorschlag' : ''}</small></div>
+                <button type="button" className="mini-action" disabled={library.length < 2} onClick={() => setMergeSourceId(exercise.id)} aria-label={`${exercise.name} mit anderer Übung verbinden`}><Link2 /></button>
+              </article>
+            })}
+            {library.length === 0 && <div className="empty-state compact"><BookOpen /><h2>Noch keine Übungen</h2><p>Übungen erscheinen hier, sobald du sie einer Einheit hinzufügst.</p></div>}
+          </div>
+        </section>
+      )}
+
       {draft && (
         <section className="gym-active-session" aria-label={`Aktives Training ${draft.templateName}`}>
           <div className="gym-session-head"><div><p>{formatShortDate(draft.date)}</p><h2 ref={activeTitleRef} tabIndex={-1}>{draft.templateName}</h2></div><span>Aktiv</span></div>
           <div className="gym-live-list">
             {draft.exercises.map((exercise, index) => (
-              <article key={exercise.id} className={`gym-live-card${expandedExerciseIds.has(exercise.id) ? ' expanded' : ''}`} data-exercise-id={exercise.id}>
+              <article key={exercise.id} className={`gym-live-card${expandedExerciseIds.has(exercise.id) ? ' expanded' : ''}${exercise.completed ? ' completed' : ''}`} data-exercise-id={exercise.id}>
                 <button type="button" className="gym-live-summary" aria-expanded={expandedExerciseIds.has(exercise.id)} aria-controls={`${exercise.id}-sets`} id={`${exercise.id}-summary`} onClick={() => toggleExercise(exercise.id)}>
-                  <span className="gym-live-index">{String(index + 1).padStart(2, '0')}</span>
-                  <span className="gym-live-plan"><strong>{exercise.name}</strong><small>{exercise.sets} Sätze · {exercise.weightKg === undefined ? 'Körpergewicht' : `${exercise.weightKg.toLocaleString('de-DE')} kg`} · {exercise.reps} Wdh.</small></span>
+                  <span className="gym-live-index" aria-hidden="true">{exercise.completed ? <Check /> : String(index + 1).padStart(2, '0')}</span>
+                  <span className="gym-live-plan"><strong>{exercise.name}</strong><small>{exercise.sets} Sätze · {exerciseWeightSummary(exercise)} · {plannedReps(exercise)} Wdh.</small></span>
                   <span className="gym-live-toggle"><small>{expandedExerciseIds.has(exercise.id) ? 'Offen' : 'Sätze'}</small>{expandedExerciseIds.has(exercise.id) ? <ChevronUp /> : <ChevronDown />}</span>
                 </button>
                 <div className="gym-set-list" id={`${exercise.id}-sets`} role="region" aria-labelledby={`${exercise.id}-summary`} hidden={!expandedExerciseIds.has(exercise.id)}>
+                  {(exercise.exerciseId ?? exercise.templateExerciseId) && previousByTemplateExercise.get((exercise.exerciseId ?? exercise.templateExerciseId)!)?.increaseNextTime && (
+                    <p className="gym-progression-hint" role="status"><TrendingUp /> Letztes Mal vorgemerkt: Gewicht steigern</p>
+                  )}
                   {setsForExercise(exercise).map((set) => {
-                    const previous = exercise.templateExerciseId ? previousByTemplateExercise.get(exercise.templateExerciseId) : undefined
-                    const previousSet = previous && setsForExercise(previous)[set.setNumber - 1]
+                    const previousKey = exercise.exerciseId ?? exercise.templateExerciseId
+                    const previous = previousKey ? previousByTemplateExercise.get(previousKey) : undefined
+                    const previousSet = previous && historicalSetsByNumber(previous).get(set.setNumber)
                     const weightInput = setWeightInputs[set.id] ?? formatDecimalInput(set.weightKg)
                     const repsInput = setRepsInputs[set.id] ?? String(set.reps)
                     const weightInvalid = !validSetWeightInput(weightInput)
@@ -605,7 +813,7 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
                         else if (parsed !== undefined && parsed <= 1000) updateSet(exercise.id, set.id, { weightKg: parsed })
                       }} onBlur={() => {
                         if (validSetWeightInput(weightInput)) setSetWeightInputs((current) => ({ ...current, [set.id]: formatDecimalInput(set.weightKg) }))
-                      }} placeholder="BW" />{weightInput !== '' && <span className="gym-metric-suffix" aria-hidden="true">kg</span>}</label>
+                      }} placeholder="kg" />{weightInput !== '' && <span className="gym-metric-suffix" aria-hidden="true">kg</span>}</label>
                       <label className={`gym-metric-control reps${repsInvalid ? ' invalid' : ''}`}><input required aria-label={`${exercise.name} Satz ${set.setNumber} Wiederholungen`} aria-invalid={repsInvalid} aria-describedby={repsInvalid ? repsErrorId : undefined} type="number" min="1" max="100" inputMode="numeric" value={repsInput} onChange={(event) => {
                         const value = event.target.value
                         setSetRepsInputs((current) => ({ ...current, [set.id]: value }))
@@ -614,10 +822,14 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
                       <div className="gym-set-feedback">
                         {weightInvalid && <small id={weightErrorId} className="gym-set-error" role="alert">Gewicht muss zwischen 0 und 1.000 kg liegen.</small>}
                         {repsInvalid && <small id={repsErrorId} className="gym-set-error" role="alert">Wiederholungen müssen zwischen 1 und 100 liegen.</small>}
-                        {!weightInvalid && !repsInvalid && <small>{previousSet ? <>Letztes Mal: <b>{previousSet.weightKg === undefined ? 'BW' : `${previousSet.weightKg.toLocaleString('de-DE')} kg`} × {previousSet.reps}</b></> : 'Noch kein Vergleich'}</small>}
+                        {!weightInvalid && !repsInvalid && <small>{previousSet ? <>Letztes Mal: <b>{previousSet.weightKg === undefined ? 'Nicht erfasst' : `${previousSet.weightKg.toLocaleString('de-DE')} kg`} × {previousSet.reps}</b></> : 'Noch kein Vergleich'}</small>}
                       </div>
                     </div>
                   })}
+                  <div className="gym-exercise-options" aria-label={`Optionen für ${exercise.name}`}>
+                    <label><input type="checkbox" aria-label={`${exercise.name} als erledigt markieren`} checked={Boolean(exercise.completed)} onChange={(event) => updateExercise(exercise.id, { completed: event.target.checked })} /><span><Check /> Übung erledigt</span></label>
+                    <label><input type="checkbox" aria-label={`${exercise.name}: nächstes Mal Gewicht steigern`} checked={Boolean(exercise.increaseNextTime)} onChange={(event) => updateExercise(exercise.id, { increaseNextTime: event.target.checked })} /><span><TrendingUp /> Nächstes Mal steigern</span></label>
+                  </div>
                 </div>
               </article>
             ))}
@@ -629,7 +841,8 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
 
       {pendingTemplate && <TrainingConfirmDialog mode="start" template={pendingTemplate} onConfirm={start} onCancel={() => setPendingTemplate(null)} />}
       {draft && finishRequested && <TrainingConfirmDialog mode="finish" template={{ name: draft.templateName, exercises: draft.exercises }} isPending={isCompleting} onConfirm={complete} onCancel={() => setFinishRequested(false)} />}
-      {editingTemplate && <TemplateEditor template={editingTemplate === 'new' ? undefined : editingTemplate} onSave={saveTemplate} onCancel={closeTemplate} onDirtyChange={onEditorDirtyChange} />}
+      {editingTemplate && <TemplateEditor template={editingTemplate === 'new' ? undefined : editingTemplate} library={library} templates={data.gymTemplates} onSave={saveTemplate} onCancel={closeTemplate} onDirtyChange={onEditorDirtyChange} />}
+      {mergeSourceId && library.find((exercise) => exercise.id === mergeSourceId) && <MergeExerciseDialog source={library.find((exercise) => exercise.id === mergeSourceId)!} library={library} templates={data.gymTemplates} sessions={data.gymSessions} onConfirm={(targetId) => mergeExercises(mergeSourceId, targetId)} onCancel={() => setMergeSourceId(null)} />}
     </section>
   )
 }

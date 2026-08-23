@@ -86,7 +86,7 @@ Nur DB, Code unverändert:
 sudo bash /opt/pace/current/scripts/deploy/restore-production.sh /var/backups/pace/pace-20260808T023000.000Z.sqlite
 ```
 
-Gepaarter Code-und-DB-Rollback, etwa nach den strukturändernden Migrationen 005 oder 006:
+Gepaarter Code-und-DB-Rollback, etwa nach den strukturändernden Migrationen 005, 006, 007, 008 oder 009:
 
 ```bash
 sudo bash /opt/pace/current/scripts/deploy/restore-production.sh \
@@ -100,12 +100,12 @@ Notfall nach SIGKILL: Zuerst `systemctl stop pace.service pace-backup.timer` und
 
 ## Release und Rollback
 
-Vor jedem Update müssen das alte Code-Release **und** der nach dem finalen Stop erzeugte Rollback-Snapshot als Paar aufbewahrt werden. Die Migrationen 005 und 006 verändern die DB-Struktur; deshalb niemals nur den Code zurückrollen.
+Vor jedem Update müssen das alte Code-Release **und** der nach dem finalen Stop erzeugte Rollback-Snapshot als Paar aufbewahrt werden. Die Migrationen 005, 006, 007, 008 und 009 verändern die DB-Struktur; deshalb niemals nur den Code zurückrollen.
 
 1. Das bisherige Ziel von `/opt/pace/current` und den vom Installer unter `/var/backups/pace/releases/<neue-release-id>/pace-rollback-<zeit>.sqlite` erzeugten Snapshot als Paar im Releaseprotokoll notieren.
 2. Neues Release ausschließlich in ein neues `/opt/pace/releases/<release-id>` übertragen und den Installer mit genau dieser ID ausführen.
 3. Health, beide Profile und Persistenz nach einem Neustart prüfen. Alte Releases und ihre gepaarten DB-Backups mindestens bis zum nächsten erfolgreich geprüften Release behalten.
-4. Rollback ausschließlich mit `restore-production.sh`, dem **zum Ziel-Code-Release gepaarten** Snapshot und der expliziten Ziel-Release-ID ausführen. Das Skript übernimmt DB-Safetyset, Units, atomaren Symlink, Zustände und Health. Die Migrationen 005 und 006 verbieten einen reinen Code-Rollback.
+4. Rollback ausschließlich mit `restore-production.sh`, dem **zum Ziel-Code-Release gepaarten** Snapshot und der expliziten Ziel-Release-ID ausführen. Das Skript übernimmt DB-Safetyset, Units, atomaren Symlink, Zustände und Health. Die Migrationen 005, 006, 007, 008 und 009 verbieten einen reinen Code-Rollback.
 
 Normale Backup-Retention und Release-Retention sind getrennt: Der tägliche Timer rotiert ausschließlich `pace-<timestamp>.sqlite` direkt im Backup-Root. Inhalte unter `releases/` werden nie automatisch gelöscht und dürfen erst entfernt werden, wenn auch das zugehörige Code-Release aus der Rollback-Aufbewahrung fällt. Off-host-Kopien bleiben verpflichtend.
 
@@ -120,4 +120,4 @@ du -sh /var/lib/pace /var/backups/pace
 sudo -u pace /usr/bin/node /opt/pace/current/scripts/backup/verify-database.mjs /var/lib/pace/pace.sqlite
 ```
 
-Erwartet: Health HTTP 200, `sqliteReady:true`, Schema 6, `quick_check=ok`, keine Google-Health-Routen (404) und ausreichend freier Speicher. Fehlerhafte Health-Antworten enthalten keine Profildaten.
+Erwartet: Health HTTP 200, `sqliteReady:true`, Schema 9, `quick_check=ok`, keine Google-Health-Routen (404) und ausreichend freier Speicher. Fehlerhafte Health-Antworten enthalten keine Profildaten.
