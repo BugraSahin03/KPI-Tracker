@@ -52,10 +52,14 @@ export interface BodyMetric {
 
 export interface GymTemplateExercise {
   id: string
+  /** Stable profile exercise used across templates. Missing only on legacy clients. */
+  exerciseId?: string
   name: string
   sets: number
   targetWeightKg?: number
   targetReps: number
+  /** Upper bound when the target is a repetition range; omitted for a single target. */
+  targetRepsMax?: number
   position: number
 }
 
@@ -69,11 +73,20 @@ export interface GymTemplate {
 
 export interface GymSessionExercise {
   id: string
+  /** Stable profile exercise used for cross-template history. Missing on legacy sessions. */
+  exerciseId?: string
   templateExerciseId?: string
   name: string
   sets: number
   weightKg?: number
   reps: number
+  /** Planned repetition target snapshot. Missing on legacy sessions. */
+  targetReps?: number
+  targetRepsMax?: number
+  /** Remind the next session of this stable template exercise to increase weight. */
+  increaseNextTime?: boolean
+  /** Whether the exercise was marked complete during this session. */
+  completed?: boolean
   position: number
   /** Individual performed sets. Missing only on legacy clients/drafts. */
   performedSets?: GymSessionSet[]
@@ -96,6 +109,13 @@ export interface GymSession {
   exercises: GymSessionExercise[]
 }
 
+export interface GymExercise {
+  id: string
+  name: string
+  createdAt: string
+  updatedAt: string
+}
+
 export interface AppData {
   version: 3
   goals: Goal[]
@@ -103,6 +123,8 @@ export interface AppData {
   bodyMetrics: BodyMetric[]
   gymTemplates: GymTemplate[]
   gymSessions: GymSession[]
+  /** Canonical profile exercise library. Missing only in legacy local payloads. */
+  gymExercises?: GymExercise[]
 }
 
 export type DataMutation =
@@ -115,5 +137,7 @@ export type DataMutation =
   | { id: string; kind: 'gym.template.delete'; templateId: string }
   | { id: string; kind: 'gym.session.complete'; session: GymSession }
   | { id: string; kind: 'gym.session.delete'; sessionId: string }
+  | { id: string; kind: 'gym.exercise.merge'; sourceExerciseId: string; targetExerciseId: string; expectedSourceName: string; expectedTargetName: string }
+  | { id: string; kind: 'gym.exercise.rename'; exerciseId: string; expectedName: string; expectedUpdatedAt: string; name: string; updatedAt: string }
 
 export type Period = 'week' | 'month' | 'year'

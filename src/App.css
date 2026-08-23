@@ -1884,6 +1884,21 @@ fieldset legend {
 
 .gym-manage-list,
 .gym-history-list { display: grid; gap: 10px; }
+.gym-library-open { margin-bottom: 12px; }
+.gym-library-open svg { width: 16px; }
+.gym-library-list { display: grid; gap: 9px; }
+.gym-library-card { min-height: 64px; padding: 11px 12px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+.gym-library-card > div { min-width: 0; display: grid; gap: 4px; }
+.gym-library-card strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .8rem; }
+.gym-library-card small { color: var(--muted); font-size: .6rem; line-height: 1.4; }
+.gym-duplicate-note { margin-bottom: 11px; padding: 9px 10px; display: flex; gap: 7px; align-items: flex-start; border: 1px solid rgba(198, 255, 61, .16); border-radius: 11px; color: #cad4b7; background: rgba(198, 255, 61, .04); font-size: .62rem; line-height: 1.45; }
+.gym-duplicate-note svg { flex: 0 0 auto; width: 15px; color: var(--lime); }
+.gym-library-merge { max-width: 460px; }
+.gym-library-merge label { display: grid; gap: 7px; margin: 16px 0 12px; }
+.gym-library-merge label > span { color: var(--muted); font-size: .62rem; font-weight: 800; text-transform: uppercase; }
+.gym-library-merge select { min-height: 46px; padding: 0 12px; border: 1px solid var(--line); border-radius: 11px; color: var(--text); background: var(--surface-2); }
+.gym-library-merge > p { margin-bottom: 16px; color: var(--muted); font-size: .7rem; line-height: 1.55; }
+.gym-library-merge > .link-button { min-height: 42px; margin-top: 5px; border: 0; background: transparent; }
 .gym-manage-card {
   min-width: 0;
   padding: 12px;
@@ -1948,19 +1963,23 @@ fieldset legend {
 .gym-session-head h2 { margin-top: 2px; font-size: 1.4rem; }
 .gym-session-head > span { padding: 6px 9px; border-radius: 999px; color: #1b2409; background: var(--lime); font-size: .62rem; font-weight: 800; text-transform: uppercase; }
 .gym-live-list { display: grid; gap: 10px; }
-.gym-live-card { overflow: hidden; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); transition: border-color .18s ease, box-shadow .18s ease; }
+.gym-live-card { overflow: hidden; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); transition: border-color .18s ease, box-shadow .18s ease, opacity .18s ease; }
 .gym-live-card.expanded { border-color: rgba(198, 255, 61, .24); box-shadow: 0 8px 24px rgba(0, 0, 0, .12); }
+.gym-live-card.completed { border-color: rgba(198, 255, 61, .18); background: color-mix(in srgb, var(--surface) 94%, var(--lime)); }
+.gym-live-card.completed:not(.expanded) { opacity: .62; }
+.gym-live-card.completed .gym-live-plan strong { color: #b9c1b2; }
 .gym-live-summary { appearance: none; width: 100%; min-height: 68px; padding: 12px 13px; display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 9px; align-items: center; border: 0; color: inherit; background: transparent; text-align: left; cursor: pointer; }
 .gym-live-summary:hover { background: rgba(255, 255, 255, .025); }
 .gym-live-summary:focus-visible { outline: 2px solid var(--lime); outline-offset: -3px; }
 .gym-live-index { color: var(--lime); font-size: .66rem; font-weight: 800; }
+.gym-live-index svg { width: 16px; height: 16px; }
 .gym-live-plan { min-width: 0; display: grid; gap: 4px; }
 .gym-live-plan strong { overflow: hidden; font-size: .86rem; text-overflow: ellipsis; white-space: nowrap; }
 .gym-live-plan small { color: var(--muted); font-size: .61rem; }
 .gym-live-toggle { display: flex; align-items: center; gap: 3px; color: var(--muted); }
 .gym-live-toggle small { font-size: .56rem; font-weight: 700; text-transform: uppercase; }
 .gym-live-toggle svg { width: 17px; }
-.gym-number-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.gym-number-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .gym-number-row input { min-height: 42px; padding: 0 8px; text-align: center; }
 .gym-set-list { padding: 0 12px 12px; display: grid; gap: 8px; }
 .gym-set-list[hidden] { display: none; }
@@ -1980,6 +1999,15 @@ fieldset legend {
 .gym-set-feedback small { color: var(--muted); font-size: .58rem; }
 .gym-set-feedback small b { color: var(--text); }
 .gym-set-feedback small.gym-set-error { color: var(--danger); font-weight: 700; }
+.gym-progression-hint { min-height: 34px; padding: 8px 10px; display: flex; align-items: center; gap: 7px; border: 1px solid rgba(198, 255, 61, .17); border-radius: 10px; color: #d8f79b; background: rgba(198, 255, 61, .055); font-size: .62rem; font-weight: 750; }
+.gym-progression-hint svg { width: 15px; height: 15px; color: var(--lime); }
+.gym-exercise-options { margin-top: 2px; padding-top: 9px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; border-top: 1px solid var(--line); }
+.gym-exercise-options label { position: relative; min-width: 0; cursor: pointer; }
+.gym-exercise-options input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.gym-exercise-options span { min-height: 38px; padding: 7px 9px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid rgba(255, 255, 255, .075); border-radius: 10px; color: var(--muted); background: rgba(255, 255, 255, .018); font-size: .58rem; font-weight: 700; text-align: center; transition: border-color .16s ease, color .16s ease, background .16s ease; }
+.gym-exercise-options span svg { flex: 0 0 auto; width: 14px; height: 14px; }
+.gym-exercise-options input:focus-visible + span { outline: 2px solid var(--lime); outline-offset: 2px; }
+.gym-exercise-options input:checked + span { border-color: rgba(198, 255, 61, .3); color: #d9efac; background: rgba(198, 255, 61, .07); }
 .gym-history-sets { display: grid; gap: 4px; }
 .gym-history-sets span { display: flex; gap: 7px; }
 .gym-history-sets b { min-width: 42px; color: var(--text); font-size: .6rem; }
@@ -2030,4 +2058,5 @@ fieldset legend {
   .gym-split-grid { gap: 6px; }
   .gym-split-start { min-height: 116px; }
   .gym-split-start small { font-size: .54rem; }
+  .gym-exercise-options { grid-template-columns: 1fr; }
 }

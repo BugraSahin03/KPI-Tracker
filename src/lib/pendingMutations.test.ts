@@ -48,4 +48,33 @@ describe('persistente Mutationsqueue', () => {
     persistPendingMutations([])
     expect(localStorage.getItem(PENDING_MUTATIONS_STORAGE_KEY)).toBeNull()
   })
+
+  it('bewahrt und simuliert eine profilbezogene Exercise-Merge-Mutation', () => {
+    const data = createInitialData('2026-08-03')
+    const timestamp = '2026-08-03T10:00:00Z'
+    data.gymExercises = [
+      { id: 'source', name: 'Curls', createdAt: timestamp, updatedAt: timestamp },
+      { id: 'target', name: 'Bizeps Curls', createdAt: timestamp, updatedAt: timestamp },
+    ]
+    const mutation: DataMutation = { id: 'merge-offline', kind: 'gym.exercise.merge', sourceExerciseId: 'source', targetExerciseId: 'target', expectedSourceName: 'Curls', expectedTargetName: 'Bizeps Curls' }
+    expect(persistPendingMutations([{ profileId: 'profile-bugra', mutation }])).toBe(true)
+    expect(loadPendingMutations()).toEqual([{ profileId: 'profile-bugra', mutation }])
+    const merged = applyPendingMutations(data, loadPendingMutations(), 'profile-bugra')
+    expect(merged.gymExercises).toEqual([expect.objectContaining({ id: 'target' })])
+    expect(applyPendingMutations(merged, loadPendingMutations(), 'profile-bugra')).toEqual(merged)
+    expect(applyPendingMutations(data, loadPendingMutations(), 'profile-sena')).toBe(data)
+  })
+
+  it('simuliert globale Rename-CAS-Mutationen in der Offline-Queue deterministisch', () => {
+    const data = createInitialData('2026-08-03')
+    const timestamp = '2026-08-03T10:00:00Z'
+    data.gymExercises = [{ id: 'bench', name: 'Bankdrücken', createdAt: timestamp, updatedAt: timestamp }]
+    data.gymTemplates[0]!.exercises = [{ id: 'row', exerciseId: 'bench', name: 'Bankdrücken', sets: 3, targetReps: 10, position: 0 }]
+    const mutation: DataMutation = { id: 'rename-offline', kind: 'gym.exercise.rename', exerciseId: 'bench', expectedName: 'Bankdrücken', expectedUpdatedAt: timestamp, name: 'Schrägbankdrücken', updatedAt: '2026-08-03T11:00:00Z' }
+    persistPendingMutations([{ profileId: 'profile-bugra', mutation }])
+    const renamed = applyPendingMutations(data, loadPendingMutations(), 'profile-bugra')
+    expect(renamed.gymExercises![0]).toMatchObject({ name: 'Schrägbankdrücken', updatedAt: '2026-08-03T11:00:00Z' })
+    expect(renamed.gymTemplates[0]!.exercises[0]!.name).toBe('Schrägbankdrücken')
+    expect(applyPendingMutations(renamed, loadPendingMutations(), 'profile-bugra')).toEqual(renamed)
+  })
 })

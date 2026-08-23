@@ -25,18 +25,19 @@ afterEach(() => {
 })
 
 describe('Production-Datenbankverifier', () => {
-  it('akzeptiert ausschließlich eine vollständige Schema-6-Pace-Datenbank', async () => {
+  it('akzeptiert ausschließlich eine vollständige Schema-9-Pace-Datenbank', async () => {
     const filename = databaseFile()
-    await expect(execFileAsync(process.execPath, [verifier, filename])).resolves.toMatchObject({ stdout: expect.stringContaining('Schema 6') })
+    await expect(execFileAsync(process.execPath, [verifier, filename])).resolves.toMatchObject({ stdout: expect.stringContaining('Schema 9') })
   })
 
   it('lehnt zu neue Schemas, fehlende Profile/Tabellen und Fremdschlüsselfehler ab', async () => {
-    for (const corruption of ['schema', 'profile', 'table', 'foreign-key'] as const) {
+    for (const corruption of ['schema', 'profile', 'table', 'alias-table', 'foreign-key'] as const) {
       const filename = databaseFile()
       const database = new Database(filename)
-      if (corruption === 'schema') database.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES (7,?)').run(new Date().toISOString())
+      if (corruption === 'schema') database.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES (10,?)').run(new Date().toISOString())
       if (corruption === 'profile') database.prepare("DELETE FROM profiles WHERE id='profile-sena'").run()
       if (corruption === 'table') { database.pragma('foreign_keys=OFF'); database.exec('DROP TABLE app_state') }
+      if (corruption === 'alias-table') { database.pragma('foreign_keys=OFF'); database.exec('DROP TABLE gym_exercise_aliases') }
       if (corruption === 'foreign-key') {
         database.pragma('foreign_keys=OFF')
         database.prepare("INSERT INTO daily_entries(profile_id,goal_id,date,status,updated_at) VALUES ('profile-bugra','missing','2026-08-01','done','2026-08-01T12:00:00Z')").run()
@@ -48,7 +49,7 @@ describe('Production-Datenbankverifier', () => {
 
   it('führt den Migrationsmodus ausdrücklich nur auf einer temporären Kopie aus', () => {
     const source = fs.readFileSync(verifier, 'utf8')
-    expect(source).toContain("argumentsList[1] !== '1..6'")
+    expect(source).toContain("argumentsList[1] !== '1..9'")
     expect(source).toContain("await copySource.backup(temporaryPath)")
     expect(source).toContain("new module.PaceDatabase(temporaryPath)")
     expect(source).not.toContain('new module.PaceDatabase(databasePath)')

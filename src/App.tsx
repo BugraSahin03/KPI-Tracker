@@ -62,7 +62,7 @@ import { DEFAULT_PROFILE_ID, type AppData, type BodyMetric, type DataMutation, t
 import { createDemoData } from './lib/demo'
 import { api, ApiError, type GoogleHealthStatus } from './lib/api'
 import { applyPendingMutations, loadPendingMutations, persistPendingMutations, type PendingMutation } from './lib/pendingMutations'
-import GymView from './GymView'
+import GymView, { type GymMutationIntent } from './GymView'
 
 type Tab = 'today' | 'gym' | 'insights' | 'goals' | 'body'
 
@@ -81,7 +81,7 @@ const BUILTIN_PROFILES: Profile[] = [
 ]
 
 function emptyData(): AppData {
-  return { version: 3, goals: [], entries: [], bodyMetrics: [], gymTemplates: [], gymSessions: [] }
+  return { version: 3, goals: [], entries: [], bodyMetrics: [], gymTemplates: [], gymSessions: [], gymExercises: [] }
 }
 
 function storedProfile(key: string): ProfileId {
@@ -1375,21 +1375,25 @@ function App() {
     load()
   }, [activeProfileId, isDemo])
 
-  const commitData = (next: AppData) => {
+  const commitData = (next: AppData, explicitMutations?: GymMutationIntent[]) => {
     if (!data) return false
     if (isDemo) {
       demoDataRef.current[activeProfileId] = next
       setData(next)
       return true
     }
-    const mutation = deriveMutation(data, next)
-    if (!mutation) {
+    const mutations: DataMutation[] = explicitMutations?.map((mutation) => ({ ...mutation, id: mutationId() } as DataMutation)) ?? (() => {
+      const mutation = deriveMutation(data, next)
+      return mutation ? [mutation] : []
+    })()
+    if (!mutations.length) {
       setServerError('Diese Änderung konnte nicht eindeutig gespeichert werden. Es wurden keine Serverdaten verändert.')
       return false
     }
-    pendingMutationsRef.current.push({ profileId: activeProfileId, mutation })
+    const queued = mutations.map((mutation) => ({ profileId: activeProfileId, mutation }))
+    pendingMutationsRef.current.push(...queued)
     if (!persistPendingMutations(pendingMutationsRef.current)) {
-      pendingMutationsRef.current.pop()
+      pendingMutationsRef.current.splice(-queued.length, queued.length)
       setServerError('Die Änderung konnte auf diesem Gerät nicht sicher vorgemerkt werden. Bitte prüfe den Browserspeicher und versuche es erneut.')
       return false
     }
@@ -1501,10 +1505,30 @@ function mutationId() {
 }
 
 function isPermanentMutationError(error: unknown): error is ApiError {
-  return error instanceof ApiError && error.status >= 400 && error.status < 500 && ![409, 429].includes(error.status)
+  return error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 429
 }
 
 function deriveMutation(current: AppData, next: AppData): DataMutation | null {
+  const removedExercise = current.gymExercises?.find((exercise) => !next.gymExercises?.some((item) => item.id === exercise.id))
+  if (removedExercise) {
+    const oldReference = current.gymTemplates.flatMap((template) => template.exercises).find((exercise) => exercise.exerciseId === removedExercise.id) ??
+      current.gymSessions.flatMap((session) => session.exercises).find((exercise) => exercise.exerciseId === removedExercise.id)
+    const newReference = oldReference && (next.gymTemplates.flatMap((template) => template.exercises).find((exercise) => exercise.id === oldReference.id) ??
+      next.gymSessions.flatMap((session) => session.exercises).find((exercise) => exercise.id === oldReference.id))
+    if (newReference?.exerciseId && newReference.exerciseId !== removedExercise.id) {
+      const target = current.gymExercises?.find((exercise) => exercise.id === newReference.exerciseId)
+      if (!target) return null
+      return { id: mutationId(), kind: 'gym.exercise.merge', sourceExerciseId: removedExercise.id, targetExerciseId: newReference.exerciseId, expectedSourceName: removedExercise.name, expectedTargetName: target.name }
+    }
+  }
+  const renamedExercise = next.gymExercises?.find((exercise) => {
+    const before = current.gymExercises?.find((item) => item.id === exercise.id)
+    return before && before.name !== exercise.name
+  })
+  if (renamedExercise) {
+    const before = current.gymExercises!.find((exercise) => exercise.id === renamedExercise.id)!
+    return { id: mutationId(), kind: 'gym.exercise.rename', exerciseId: before.id, expectedName: before.name, expectedUpdatedAt: before.updatedAt, name: renamedExercise.name, updatedAt: renamedExercise.updatedAt }
+  }
   const removedTemplate = current.gymTemplates.find((template) => !next.gymTemplates.some((item) => item.id === template.id))
   if (removedTemplate) return { id: mutationId(), kind: 'gym.template.delete', templateId: removedTemplate.id }
   const changedTemplate = next.gymTemplates.find((template) => JSON.stringify(template) !== JSON.stringify(current.gymTemplates.find((item) => item.id === template.id)))

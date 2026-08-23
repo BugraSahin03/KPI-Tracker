@@ -3,8 +3,8 @@ import Database from 'better-sqlite3'
 import fs from 'node:fs'
 import path from 'node:path'
 
-const EXPECTED_SCHEMA_VERSION = 6
-const REQUIRED_TABLES = ['app_state', 'body_metrics', 'daily_entries', 'goals', 'gym_session_sets', 'gym_sessions', 'gym_templates', 'profiles', 'schema_migrations']
+const EXPECTED_SCHEMA_VERSION = 9
+const REQUIRED_TABLES = ['app_state', 'body_metrics', 'daily_entries', 'goals', 'gym_exercise_aliases', 'gym_exercises', 'gym_session_sets', 'gym_sessions', 'gym_templates', 'profiles', 'schema_migrations']
 
 function inspectExact(databasePath) {
   const database = new Database(databasePath, { readonly: true, fileMustExist: true })
@@ -19,6 +19,14 @@ function inspectExact(databasePath) {
     if (!database.prepare('SELECT 1 FROM app_state WHERE singleton=1').get()) throw new Error('app_state ist unvollständig.')
     const profiles = database.prepare('SELECT id FROM profiles ORDER BY id').pluck().all()
     if (JSON.stringify(profiles) !== JSON.stringify(['profile-bugra', 'profile-sena'])) throw new Error('Erwartete Profile Bugra und Sena fehlen oder es existieren unerwartete Profile.')
+    const missingExerciseRefs = Number(database.prepare(`SELECT
+      (SELECT COUNT(*) FROM gym_template_exercises WHERE exercise_id IS NULL) +
+      (SELECT COUNT(*) FROM gym_session_exercises WHERE exercise_id IS NULL)`).pluck().get() ?? 0)
+    if (missingExerciseRefs) throw new Error(`${missingExerciseRefs} GYM-Zeilen besitzen keine kanonische Übungsreferenz.`)
+    const crossProfileRefs = Number(database.prepare(`SELECT
+      (SELECT COUNT(*) FROM gym_template_exercises row JOIN gym_exercises exercise ON exercise.id=row.exercise_id WHERE row.profile_id<>exercise.profile_id) +
+      (SELECT COUNT(*) FROM gym_session_exercises row JOIN gym_exercises exercise ON exercise.id=row.exercise_id WHERE row.profile_id<>exercise.profile_id)`).pluck().get() ?? 0)
+    if (crossProfileRefs) throw new Error(`${crossProfileRefs} GYM-Referenzen überschreiten Profilgrenzen.`)
   } finally {
     database.close()
   }
@@ -57,13 +65,13 @@ async function verifyMigrationOnCopy(databasePath) {
 
 const argumentsList = process.argv.slice(2)
 const allowMigration = argumentsList[0] === '--allow-migrate-from'
-if (allowMigration && argumentsList[1] !== '1..6') throw new Error('Erlaubter Bereich muss explizit 1..6 sein.')
+if (allowMigration && argumentsList[1] !== '1..9') throw new Error('Erlaubter Bereich muss explizit 1..9 sein.')
 const input = allowMigration ? argumentsList[2] : argumentsList[0]
-if (!input || argumentsList.length !== (allowMigration ? 3 : 1)) throw new Error('Aufruf: verify-database.mjs [--allow-migrate-from 1..6] <sqlite-pfad>')
+if (!input || argumentsList.length !== (allowMigration ? 3 : 1)) throw new Error('Aufruf: verify-database.mjs [--allow-migrate-from 1..9] <sqlite-pfad>')
 const databasePath = path.resolve(input)
 if (!fs.existsSync(databasePath) || !fs.statSync(databasePath).isFile()) throw new Error('SQLite-Datei fehlt oder ist keine reguläre Datei.')
 if (allowMigration) await verifyMigrationOnCopy(databasePath)
 else {
   inspectExact(databasePath)
-  console.log('SQLite Schema 6, Profile, quick_check und foreign_key_check: ok')
+  console.log('SQLite Schema 9, Profile, quick_check und foreign_key_check: ok')
 }

@@ -64,6 +64,68 @@ describe('Pace API', () => {
     expect(ids.every((id: string) => id.length <= 100)).toBe(true)
   })
 
+  it('liefert Wiederholungsranges und Übungsfortschritt über die API profilisoliert zurück', async () => {
+    database = new PaceDatabase(':memory:')
+    const app = createApp(database, new GoogleHealthService(database))
+    const timestamp = new Date().toISOString()
+    const template = { id: 'range-push', name: 'Push', createdAt: timestamp, updatedAt: timestamp, exercises: [
+      { id: 'range-bench', name: 'Bankdrücken', sets: 3, targetWeightKg: 80, targetReps: 8, targetRepsMax: 12, position: 0 },
+    ] }
+    await request(app).post('/api/mutations').send({ profileId: 'profile-bugra', mutation: { id: 'range-template', kind: 'gym.template.upsert', template } }).expect(200)
+    const startedAt = new Date(Date.now() - 60_000).toISOString()
+    const session = { id: 'range-session', templateId: template.id, templateName: 'Push', date: todayKey(), startedAt, completedAt: timestamp, exercises: [
+      { id: 'range-session-bench', templateExerciseId: 'range-bench', name: 'Bankdrücken', sets: 3, weightKg: 80, reps: 10, targetReps: 8, targetRepsMax: 12, increaseNextTime: true, completed: true, position: 0 },
+    ] }
+    const response = await request(app).post('/api/mutations').send({ profileId: 'profile-bugra', mutation: { id: 'range-complete', kind: 'gym.session.complete', session } }).expect(200)
+    expect(response.body.data.gymTemplates.find((item: { id: string }) => item.id === template.id).exercises[0]).toMatchObject({ targetReps: 8, targetRepsMax: 12 })
+    expect(response.body.data.gymSessions[0].exercises[0]).toMatchObject({ targetReps: 8, targetRepsMax: 12, increaseNextTime: true, completed: true })
+    expect((await request(app).get('/api/data?profileId=profile-sena').expect(200)).body.data.gymSessions).toEqual([])
+  })
+
+  it('merged kanonische Übungen über die API atomar, profilisoliert und bei Retry nur einmal', async () => {
+    database = new PaceDatabase(':memory:')
+    const app = createApp(database, new GoogleHealthService(database))
+    const timestamp = new Date().toISOString()
+    const push = database.getData('profile-bugra').gymTemplates[0]!
+    const pull = database.getData('profile-bugra').gymTemplates[1]!
+    await request(app).post('/api/mutations').send({ profileId: 'profile-bugra', mutation: { id: 'push-curl', kind: 'gym.template.upsert', template: { ...push, exercises: [{ id: 'push-row', exerciseId: 'curl-source', name: 'Curls', sets: 3, targetReps: 10, position: 0 }], updatedAt: timestamp } } }).expect(200)
+    await request(app).post('/api/mutations').send({ profileId: 'profile-bugra', mutation: { id: 'pull-curl', kind: 'gym.template.upsert', template: { ...pull, exercises: [{ id: 'pull-row', exerciseId: 'curl-target', name: 'Bizeps Curls', sets: 4, targetReps: 8, position: 0 }], updatedAt: timestamp } } }).expect(200)
+    const mutation = { id: 'merge-via-api', kind: 'gym.exercise.merge', sourceExerciseId: 'curl-source', targetExerciseId: 'curl-target', expectedSourceName: 'Curls', expectedTargetName: 'Bizeps Curls' }
+    const first = await request(app).post('/api/mutations').send({ profileId: 'profile-bugra', mutation }).expect(200)
+    const retry = await request(app).post('/api/mutations').send({ profileId: 'profile-bugra', mutation }).expect(200)
+    expect(first.body.applied).toBe(true)
+    expect(retry.body.applied).toBe(false)
+    expect(retry.body.data.gymExercises.filter((exercise: { id: string }) => exercise.id === 'curl-source')).toHaveLength(0)
+    expect(retry.body.data.gymTemplates.slice(0, 2).flatMap((template: { exercises: { exerciseId: string }[] }) => template.exercises).map((exercise: { exerciseId: string }) => exercise.exerciseId)).toEqual(['curl-target', 'curl-target'])
+    expect((await request(app).get('/api/data?profileId=profile-sena')).body.data.gymExercises).toEqual([])
+
+    const stalePush = { ...push, exercises: [{ id: 'stale-row', exerciseId: 'curl-source', name: 'Alter Gerätename', sets: 2, targetReps: 12, position: 0 }], updatedAt: new Date(Date.now() + 1_000).toISOString() }
+    const stale = await request(app).post('/api/mutations').send({ profileId: 'profile-bugra', mutation: { id: 'stale-after-merge', kind: 'gym.template.upsert', template: stalePush } }).expect(200)
+    expect(stale.body.data.gymExercises).toEqual([expect.objectContaining({ id: 'curl-target', name: 'Bizeps Curls' })])
+    expect(stale.body.data.gymTemplates.find((item: { id: string }) => item.id === push.id).exercises[0]).toMatchObject({ exerciseId: 'curl-target', name: 'Bizeps Curls' })
+
+    const target = stale.body.data.gymExercises[0]
+    const renameBase = { exerciseId: target.id, expectedName: target.name, expectedUpdatedAt: target.updatedAt }
+    await request(app).post('/api/mutations').send({ profileId: 'profile-bugra', mutation: { id: 'rename-first', kind: 'gym.exercise.rename', ...renameBase, name: 'Curls global', updatedAt: '2026-08-23T12:00:00.000Z' } }).expect(200)
+    await request(app).post('/api/mutations').send({ profileId: 'profile-bugra', mutation: { id: 'rename-stale-conflict', kind: 'gym.exercise.rename', ...renameBase, name: 'Stale zurück', updatedAt: '2026-08-23T12:01:00.000Z' } }).expect(409)
+    expect((await request(app).get('/api/data?profileId=profile-bugra')).body.data.gymExercises[0].name).toBe('Curls global')
+  })
+
+  it('lehnt Exercise-Merge innerhalb derselben Einheit explizit und atomar ab', async () => {
+    database = new PaceDatabase(':memory:')
+    const app = createApp(database, new GoogleHealthService(database))
+    const template = database.getData('profile-bugra').gymTemplates[0]!
+    const timestamp = new Date().toISOString()
+    await request(app).post('/api/mutations').send({ profileId: 'profile-bugra', mutation: { id: 'same-plan-setup', kind: 'gym.template.upsert', template: { ...template, updatedAt: timestamp, exercises: [
+      { id: 'row-a', exerciseId: 'canonical-a', name: 'Curl A', sets: 3, targetReps: 10, position: 0 },
+      { id: 'row-b', exerciseId: 'canonical-b', name: 'Curl B', sets: 3, targetReps: 10, position: 1 },
+    ] } } }).expect(200)
+    await request(app).post('/api/mutations').send({ profileId: 'profile-bugra', mutation: { id: 'same-plan-merge', kind: 'gym.exercise.merge', sourceExerciseId: 'canonical-a', targetExerciseId: 'canonical-b', expectedSourceName: 'Curl A', expectedTargetName: 'Curl B' } }).expect(409)
+    const stored = (await request(app).get('/api/data?profileId=profile-bugra').expect(200)).body.data
+    expect(stored.gymExercises.map((exercise: { id: string }) => exercise.id)).toEqual(expect.arrayContaining(['canonical-a', 'canonical-b']))
+    expect(stored.gymTemplates.find((item: { id: string }) => item.id === template.id).exercises.map((exercise: { exerciseId: string }) => exercise.exerciseId)).toEqual(['canonical-a', 'canonical-b'])
+  })
+
   it('akzeptiert den Berliner Kalendertag direkt nach Mitternacht trotz UTC-Vortag', async () => {
     database = new PaceDatabase(':memory:')
     const instant = new Date('2026-08-06T22:30:00.000Z')
@@ -159,10 +221,10 @@ describe('Pace API', () => {
     }
   })
 
-  it('prüft Health ohne persönliche Daten und meldet Schema 6', async () => {
+  it('prüft Health ohne persönliche Daten und meldet Schema 9', async () => {
     database = new PaceDatabase(':memory:')
     const response = await request(createApp(database, new GoogleHealthService(database))).get('/api/health').expect(200)
-    expect(response.body).toEqual({ status: 'ok', sqliteReady: true, schemaVersion: 6 })
+    expect(response.body).toEqual({ status: 'ok', sqliteReady: true, schemaVersion: 9 })
     expect(JSON.stringify(response.body)).not.toContain('Bugra')
   })
 
@@ -176,9 +238,9 @@ describe('Pace API', () => {
 
   it('liefert bei unerwarteter Schemaversion Health 503', async () => {
     database = new PaceDatabase(':memory:')
-    database.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(7, new Date().toISOString())
+    database.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(10, new Date().toISOString())
     const response = await request(createApp(database, new GoogleHealthService(database))).get('/api/health').expect(503)
-    expect(response.body).toEqual({ status: 'unavailable', sqliteReady: false, schemaVersion: 7 })
+    expect(response.body).toEqual({ status: 'unavailable', sqliteReady: false, schemaVersion: 10 })
   })
 
   it('setzt restriktive Browser-Sicherheitsheader', async () => {

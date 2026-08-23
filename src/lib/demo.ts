@@ -46,12 +46,20 @@ export function createDemoData(anchor = new Date()): AppData {
   const normalizedAnchor = startOfDay(anchor)
   const start = startOfMonth(subMonths(normalizedAnchor, 11))
   const data = createInitialData(toDateKey(start))
-  const programs: Record<string, Omit<GymTemplateExercise, 'id' | 'position'>[]> = {
-    Push: [{ name: 'Bankdrücken', sets: 3, targetWeightKg: 70, targetReps: 8 }, { name: 'Schulterdrücken', sets: 3, targetWeightKg: 32.5, targetReps: 10 }],
-    Pull: [{ name: 'Latzug', sets: 3, targetWeightKg: 60, targetReps: 10 }, { name: 'Rudern', sets: 3, targetWeightKg: 55, targetReps: 10 }],
-    Beine: [{ name: 'Kniebeugen', sets: 3, targetWeightKg: 80, targetReps: 8 }, { name: 'Beinpresse', sets: 3, targetWeightKg: 140, targetReps: 10 }],
+  const programs: Record<string, (Omit<GymTemplateExercise, 'id' | 'position' | 'targetWeightKg'> & { weightKg: number })[]> = {
+    Push: [{ name: 'Bankdrücken', sets: 3, weightKg: 70, targetReps: 8 }, { name: 'Schulterdrücken', sets: 3, weightKg: 32.5, targetReps: 10 }],
+    Pull: [{ name: 'Latzug', sets: 3, weightKg: 60, targetReps: 10 }, { name: 'Rudern', sets: 3, weightKg: 55, targetReps: 10 }],
+    Beine: [{ name: 'Kniebeugen', sets: 3, weightKg: 80, targetReps: 8 }, { name: 'Beinpresse', sets: 3, weightKg: 140, targetReps: 10 }],
   }
-  data.gymTemplates = data.gymTemplates.map((template) => ({ ...template, exercises: (programs[template.name] ?? []).map((exercise, position) => ({ ...exercise, id: `demo-${template.name}-${position}`, position })) }))
+  const demoWeights = new Map<string, number>()
+  data.gymTemplates = data.gymTemplates.map((template) => ({ ...template, exercises: (programs[template.name] ?? []).map((exercise, position) => {
+    const id = `demo-${template.name}-${position}`
+    demoWeights.set(id, exercise.weightKg)
+    return { id, exerciseId: id, name: exercise.name, sets: exercise.sets, targetReps: exercise.targetReps, position }
+  }) }))
+  data.gymExercises = data.gymTemplates.flatMap((template) => template.exercises.map((exercise) => ({
+    id: exercise.exerciseId!, name: exercise.name, createdAt: template.createdAt, updatedAt: template.updatedAt,
+  })))
   const entries: DailyEntry[] = []
 
   for (const date of dateRange(start, normalizedAnchor)) {
@@ -100,11 +108,11 @@ export function createDemoData(anchor = new Date()): AppData {
       startedAt: `${date}T17:30:00.000Z`,
       completedAt: `${date}T18:35:00.000Z`,
       exercises: template.exercises.map((exercise) => ({
-        id: `demo-session-${date}-${exercise.position}`, templateExerciseId: exercise.id, name: exercise.name,
-        sets: exercise.sets, weightKg: exercise.targetWeightKg, reps: exercise.targetReps, position: exercise.position,
+        id: `demo-session-${date}-${exercise.position}`, templateExerciseId: exercise.id, exerciseId: exercise.exerciseId, name: exercise.name,
+        sets: exercise.sets, weightKg: demoWeights.get(exercise.id), reps: exercise.targetReps, position: exercise.position,
         performedSets: Array.from({ length: exercise.sets }, (_, index) => ({
           id: `demo-session-${date}-${exercise.position}-set-${index + 1}`, setNumber: index + 1,
-          weightKg: exercise.targetWeightKg, reps: exercise.targetReps,
+          weightKg: demoWeights.get(exercise.id), reps: exercise.targetReps,
         })),
       })),
     })

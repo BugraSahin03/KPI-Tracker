@@ -7,6 +7,7 @@ import type {
   GoalIcon,
   GoalStatus,
   GymSession,
+  GymExercise,
   GymTemplate,
 } from '../types.js'
 import { isValid, parseISO } from 'date-fns'
@@ -59,6 +60,7 @@ export function createInitialData(startDate = todayKey()): AppData {
     bodyMetrics: [],
     gymTemplates: createDefaultGymTemplates(`${startDate}T00:00:00.000Z`),
     gymSessions: [],
+    gymExercises: [],
   }
 }
 
@@ -200,13 +202,20 @@ function validExerciseNumbers(value: Record<string, unknown>, weightKey: 'target
     (weight === undefined || (typeof weight === 'number' && Number.isFinite(weight) && weight >= 0 && weight <= 1000))
 }
 
+function validOptionalRepRange(value: Record<string, unknown>, minKey: 'targetReps' | 'reps') {
+  const max = value.targetRepsMax
+  if (max === undefined) return true
+  return Number.isInteger(max) && Number(max) >= Number(value[minKey]) && Number(max) <= 100
+}
+
 export function isGymTemplate(value: unknown): value is GymTemplate {
   if (!isRecord(value) || !Array.isArray(value.exercises)) return false
   return isIdentifier(value.id) && typeof value.name === 'string' && value.name.trim().length > 0 && value.name.length <= 50 &&
     isTimestamp(value.createdAt) && isTimestamp(value.updatedAt) &&
     orderedUniqueExercises(value.exercises, (exercise) => isRecord(exercise) && isIdentifier(exercise.id) &&
+      (exercise.exerciseId === undefined || isIdentifier(exercise.exerciseId)) &&
       typeof exercise.name === 'string' && exercise.name.trim().length > 0 && exercise.name.length <= 80 &&
-      Number.isInteger(exercise.position) && validExerciseNumbers(exercise, 'targetWeightKg'))
+      Number.isInteger(exercise.position) && validExerciseNumbers(exercise, 'targetWeightKg') && validOptionalRepRange(exercise, 'targetReps'))
 }
 
 export function isGymSession(value: unknown): value is GymSession {
@@ -217,8 +226,13 @@ export function isGymSession(value: unknown): value is GymSession {
     Date.parse(String(value.startedAt)) <= Date.parse(String(value.completedAt)) && value.exercises.length > 0 &&
     orderedUniqueExercises(value.exercises, (exercise) => isRecord(exercise) && isIdentifier(exercise.id) &&
       (exercise.templateExerciseId === undefined || isIdentifier(exercise.templateExerciseId)) &&
+      (exercise.exerciseId === undefined || isIdentifier(exercise.exerciseId)) &&
       typeof exercise.name === 'string' && exercise.name.trim().length > 0 && exercise.name.length <= 80 &&
       Number.isInteger(exercise.position) && validExerciseNumbers(exercise, 'weightKg') &&
+      (exercise.targetReps === undefined || (Number.isInteger(exercise.targetReps) && Number(exercise.targetReps) >= 1 && Number(exercise.targetReps) <= 100)) &&
+      (exercise.targetRepsMax === undefined || (exercise.targetReps !== undefined && Number.isInteger(exercise.targetRepsMax) && Number(exercise.targetRepsMax) >= Number(exercise.targetReps) && Number(exercise.targetRepsMax) <= 100)) &&
+      (exercise.increaseNextTime === undefined || typeof exercise.increaseNextTime === 'boolean') &&
+      (exercise.completed === undefined || typeof exercise.completed === 'boolean') &&
       (exercise.performedSets === undefined || (Array.isArray(exercise.performedSets) &&
         exercise.performedSets.length === exercise.sets && exercise.performedSets.every((set, index) =>
           isRecord(set) && isIdentifier(set.id) && set.setNumber === index + 1 &&
@@ -231,6 +245,11 @@ export function isGymSession(value: unknown): value is GymSession {
   return new Set(setIds).size === setIds.length
 }
 
+export function isGymExercise(value: unknown): value is GymExercise {
+  return isRecord(value) && isIdentifier(value.id) && typeof value.name === 'string' && value.name.trim().length > 0 && value.name.length <= 80 &&
+    isTimestamp(value.createdAt) && isTimestamp(value.updatedAt)
+}
+
 export function isAppData(value: unknown): value is AppData {
   if (!isRecord(value)) return false
   if (value.version === 1) return migrateV1(value) !== null
@@ -241,7 +260,8 @@ export function isAppData(value: unknown): value is AppData {
     Array.isArray(value.entries) && value.entries.every(isEntry) &&
     Array.isArray(value.bodyMetrics) && value.bodyMetrics.every(isBodyMetric) &&
     Array.isArray(value.gymTemplates) && value.gymTemplates.every(isGymTemplate) &&
-    Array.isArray(value.gymSessions) && value.gymSessions.every(isGymSession)
+    Array.isArray(value.gymSessions) && value.gymSessions.every(isGymSession) &&
+    (value.gymExercises === undefined || (Array.isArray(value.gymExercises) && value.gymExercises.every(isGymExercise)))
   )) return false
   const goals = value.goals as Goal[]
   const entries = value.entries as DailyEntry[]
@@ -252,11 +272,16 @@ export function isAppData(value: unknown): value is AppData {
   const externalIds = metrics.flatMap((metric) => metric.externalId ? [metric.externalId] : [])
   const templates = value.gymTemplates as GymTemplate[]
   const sessions = value.gymSessions as GymSession[]
+  const gymExercises = (value.gymExercises ?? []) as GymExercise[]
+  const exerciseIds = new Set(gymExercises.map((exercise) => exercise.id))
   return goalIds.size === goals.length && metricIds.size === metrics.length &&
     new Set(externalIds).size === externalIds.length && entryKeys.size === entries.length &&
     entries.every((entry) => goalIds.has(entry.goalId)) &&
     new Set(templates.map((template) => template.id)).size === templates.length &&
-    new Set(sessions.map((session) => session.id)).size === sessions.length
+    new Set(sessions.map((session) => session.id)).size === sessions.length &&
+    exerciseIds.size === gymExercises.length &&
+    (gymExercises.length === 0 || templates.every((template) => template.exercises.every((exercise) => exercise.exerciseId === undefined || exerciseIds.has(exercise.exerciseId))) &&
+      sessions.every((session) => session.exercises.every((exercise) => exercise.exerciseId === undefined || exerciseIds.has(exercise.exerciseId))))
 }
 
 export function normalizeAppData(value: unknown): AppData | null {

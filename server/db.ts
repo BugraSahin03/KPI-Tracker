@@ -95,7 +95,10 @@ export class PaceDatabase {
     const bodyMetrics = (this.db.prepare('SELECT * FROM body_metrics WHERE profile_id=? ORDER BY date DESC, julianday(COALESCE(measured_at, created_at)) DESC, id DESC').all(profileId) as Row[]).map(rowToBodyMetric)
     const gymTemplates = (this.db.prepare('SELECT * FROM gym_templates WHERE profile_id=? ORDER BY rowid').all(profileId) as Row[]).map((row) => rowToGymTemplate(this.db, row, profileId))
     const gymSessions = (this.db.prepare('SELECT * FROM gym_sessions WHERE profile_id=? ORDER BY date DESC, completed_at DESC').all(profileId) as Row[]).map((row) => rowToGymSession(this.db, row, profileId))
-    return { version: 3, goals, entries, bodyMetrics, gymTemplates, gymSessions }
+    const gymExercises = (this.db.prepare('SELECT id,name,created_at,updated_at FROM gym_exercises WHERE profile_id=? ORDER BY name COLLATE NOCASE,id').all(profileId) as Row[]).map((row) => ({
+      id: String(row.id), name: String(row.name), createdAt: normalizeSqlTimestamp(String(row.created_at)), updatedAt: normalizeSqlTimestamp(String(row.updated_at)),
+    }))
+    return { version: 3, goals, entries, bodyMetrics, gymTemplates, gymSessions, gymExercises }
   }
 
   private hasExactSeed() {
@@ -157,6 +160,8 @@ export class PaceDatabase {
       this.db.prepare('DELETE FROM body_metrics WHERE profile_id=?').run(profileId)
       this.db.prepare('DELETE FROM gym_sessions WHERE profile_id=?').run(profileId)
       this.db.prepare('DELETE FROM gym_templates WHERE profile_id=?').run(profileId)
+      this.db.prepare('DELETE FROM gym_exercise_aliases WHERE profile_id=?').run(profileId)
+      this.db.prepare('DELETE FROM gym_exercises WHERE profile_id=?').run(profileId)
       const insertGoal = this.db.prepare(`INSERT INTO goals
         (profile_id,id,name,unit,target,icon,color,active,created_at,activity_periods_json) VALUES (?,?,?,?,?,?,?,?,?,?)`)
       for (const goal of data.goals) insertGoal.run(profileId, goal.id, goal.name, goal.unit, goal.target, goal.icon, goal.color, goal.active ? 1 : 0, goal.createdAt, JSON.stringify(goal.activityPeriods))
@@ -170,14 +175,18 @@ export class PaceDatabase {
         metric.bmi ?? null, metric.leanBodyMassKg ?? null, metric.source ?? 'manual', metric.measuredAt ?? null,
         metric.externalId ?? null, metric.createdAt, rawByMetric.get(metric.id) ?? null,
       )
+      for (const exercise of data.gymExercises ?? []) this.ensureGymExercise(profileId, exercise.id, exercise.name, exercise.createdAt, exercise.updatedAt)
       const insertTemplate = this.db.prepare('INSERT INTO gym_templates(profile_id,id,name,created_at,updated_at) VALUES (?,?,?,?,?)')
       const insertTemplateExercise = this.db.prepare(`INSERT INTO gym_template_exercises
-        (profile_id,id,template_id,name,sets,target_weight_kg,target_reps,position) VALUES (?,?,?,?,?,?,?,?)`)
+        (profile_id,id,template_id,name,sets,target_weight_kg,target_reps,target_reps_max,position,exercise_id) VALUES (?,?,?,?,?,?,?,?,?,?)`)
       for (const template of data.gymTemplates) {
         insertTemplate.run(profileId, template.id, template.name, template.createdAt, template.updatedAt)
-        for (const exercise of template.exercises) insertTemplateExercise.run(
-          profileId, exercise.id, template.id, exercise.name, exercise.sets, exercise.targetWeightKg ?? null, exercise.targetReps, exercise.position,
-        )
+        for (const exercise of template.exercises) {
+          const exerciseId = this.ensureGymExercise(profileId, exercise.exerciseId ?? exercise.id, exercise.name, template.createdAt, template.updatedAt)
+          insertTemplateExercise.run(
+            profileId, exercise.id, template.id, this.gymExerciseName(profileId, exerciseId), exercise.sets, exercise.targetWeightKg ?? null, exercise.targetReps, exercise.targetRepsMax ?? null, exercise.position, exerciseId,
+          )
+        }
       }
       for (const session of data.gymSessions) this.insertGymSession(profileId, session)
       const restorePoint = this.db.prepare('INSERT OR IGNORE INTO integration_data_points(provider,external_id,profile_id,body_metric_id,imported_at) VALUES (?,?,?,?,?)')
@@ -236,6 +245,10 @@ export class PaceDatabase {
         this.insertGymSession(profileId, mutation.session)
       } else if (mutation.kind === 'gym.session.delete') {
         this.db.prepare('DELETE FROM gym_sessions WHERE profile_id=? AND id=?').run(profileId, mutation.sessionId)
+      } else if (mutation.kind === 'gym.exercise.merge') {
+        this.mergeGymExercises(profileId, mutation.sourceExerciseId, mutation.targetExerciseId, mutation.expectedSourceName, mutation.expectedTargetName)
+      } else if (mutation.kind === 'gym.exercise.rename') {
+        this.renameGymExercise(profileId, mutation.exerciseId, mutation.expectedName, mutation.expectedUpdatedAt, mutation.name, mutation.updatedAt)
       }
       this.db.prepare('INSERT INTO mutation_receipts(mutation_id,kind,applied_at,profile_id) VALUES (?,?,?,?)').run(mutation.id, mutation.kind, new Date().toISOString(), profileId)
       this.db.prepare('UPDATE app_state SET revision=revision+1,seed_pristine=0 WHERE singleton=1').run()
@@ -248,12 +261,80 @@ export class PaceDatabase {
       ON CONFLICT(profile_id,id) DO UPDATE SET name=excluded.name,updated_at=excluded.updated_at`).run(
       profileId, template.id, template.name, template.createdAt, template.updatedAt,
     )
+    const existingExerciseIds = new Map((this.db.prepare('SELECT id,exercise_id FROM gym_template_exercises WHERE profile_id=? AND template_id=?').all(profileId, template.id) as Row[])
+      .filter((row) => row.exercise_id != null).map((row) => [String(row.id), String(row.exercise_id)]))
     this.db.prepare('DELETE FROM gym_template_exercises WHERE profile_id=? AND template_id=?').run(profileId, template.id)
     const insert = this.db.prepare(`INSERT INTO gym_template_exercises
-      (profile_id,id,template_id,name,sets,target_weight_kg,target_reps,position) VALUES (?,?,?,?,?,?,?,?)`)
-    for (const exercise of template.exercises) insert.run(
-      profileId, exercise.id, template.id, exercise.name, exercise.sets, exercise.targetWeightKg ?? null, exercise.targetReps, exercise.position,
-    )
+      (profile_id,id,template_id,name,sets,target_weight_kg,target_reps,target_reps_max,position,exercise_id) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+    for (const exercise of template.exercises) {
+      const exerciseId = this.ensureGymExercise(profileId, exercise.exerciseId ?? existingExerciseIds.get(exercise.id) ?? exercise.id, exercise.name, template.createdAt, template.updatedAt)
+      const canonicalName = this.gymExerciseName(profileId, exerciseId)
+      insert.run(profileId, exercise.id, template.id, canonicalName, exercise.sets, exercise.targetWeightKg ?? null, exercise.targetReps, exercise.targetRepsMax ?? null, exercise.position, exerciseId)
+    }
+  }
+
+  private ensureGymExercise(profileId: string, exerciseId: string, name: string, createdAt: string, updatedAt: string) {
+    const aliasResolved = this.resolveGymExerciseId(profileId, exerciseId)
+    if (aliasResolved !== exerciseId) return aliasResolved
+    const owner = this.db.prepare('SELECT profile_id FROM gym_exercises WHERE id=?').get(exerciseId) as Row | undefined
+    const scopedId = owner && String(owner.profile_id) !== profileId
+      ? `gym-exercise-${createHash('sha256').update(`${profileId}\0${exerciseId}`).digest('hex').slice(0, 32)}`
+      : exerciseId
+    const resolvedId = this.resolveGymExerciseId(profileId, scopedId)
+    if (resolvedId !== scopedId) return resolvedId
+    // Template/session payloads may be stale. They can create a genuinely new
+    // canonical exercise, but never rename an existing one.
+    this.db.prepare('INSERT OR IGNORE INTO gym_exercises(id,profile_id,name,created_at,updated_at) VALUES (?,?,?,?,?)').run(resolvedId, profileId, name, createdAt, updatedAt)
+    return resolvedId
+  }
+
+  private resolveGymExerciseId(profileId: string, exerciseId: string) {
+    let current = exerciseId
+    const seen = new Set<string>()
+    while (true) {
+      if (seen.has(current)) throw gymExerciseConflict('Übungs-Verknüpfung enthält einen Zyklus.')
+      seen.add(current)
+      const alias = this.db.prepare('SELECT target_id FROM gym_exercise_aliases WHERE profile_id=? AND source_id=?').get(profileId, current) as Row | undefined
+      if (!alias) return current
+      current = String(alias.target_id)
+    }
+  }
+
+  private gymExerciseName(profileId: string, exerciseId: string) {
+    const row = this.db.prepare('SELECT name FROM gym_exercises WHERE profile_id=? AND id=?').get(profileId, exerciseId) as Row | undefined
+    if (!row) throw integrityError()
+    return String(row.name)
+  }
+
+  private mergeGymExercises(profileId: string, requestedSourceId: string, requestedTargetId: string, expectedSourceName: string, expectedTargetName: string) {
+    const sourceId = this.resolveGymExerciseId(profileId, requestedSourceId)
+    const targetId = this.resolveGymExerciseId(profileId, requestedTargetId)
+    if (sourceId === targetId) return
+    const target = this.db.prepare('SELECT name FROM gym_exercises WHERE profile_id=? AND id=?').get(profileId, targetId) as Row | undefined
+    const source = this.db.prepare('SELECT name FROM gym_exercises WHERE profile_id=? AND id=?').get(profileId, sourceId) as Row | undefined
+    if (!target || !source) throw integrityError()
+    if (String(source.name) !== expectedSourceName || String(target.name) !== expectedTargetName) {
+      throw gymExerciseConflict('Die Übung wurde zwischenzeitlich umbenannt. Bitte Bibliothek neu laden.')
+    }
+    const sameTemplate = this.db.prepare(`SELECT template_id FROM gym_template_exercises
+      WHERE profile_id=? AND exercise_id IN (?,?) GROUP BY template_id HAVING COUNT(DISTINCT exercise_id)=2 LIMIT 1`).get(profileId, sourceId, targetId)
+    if (sameTemplate) throw gymExerciseConflict('Diese Übungen werden bereits gemeinsam in einer Einheit verwendet und können nicht verbunden werden.')
+    this.db.prepare('UPDATE gym_template_exercises SET exercise_id=?,name=? WHERE profile_id=? AND exercise_id=?').run(targetId, target.name, profileId, sourceId)
+    this.db.prepare('UPDATE gym_session_exercises SET exercise_id=?,name=? WHERE profile_id=? AND exercise_id=?').run(targetId, target.name, profileId, sourceId)
+    // Keep all historic source ids as flattened aliases before deleting source.
+    this.db.prepare('UPDATE gym_exercise_aliases SET target_id=? WHERE profile_id=? AND target_id=?').run(targetId, profileId, sourceId)
+    this.db.prepare(`INSERT INTO gym_exercise_aliases(profile_id,source_id,target_id,created_at) VALUES (?,?,?,?)
+      ON CONFLICT(profile_id,source_id) DO UPDATE SET target_id=excluded.target_id`).run(profileId, sourceId, targetId, new Date().toISOString())
+    this.db.prepare('DELETE FROM gym_exercises WHERE profile_id=? AND id=?').run(profileId, sourceId)
+  }
+
+  private renameGymExercise(profileId: string, requestedId: string, expectedName: string, expectedUpdatedAt: string, name: string, updatedAt: string) {
+    const exerciseId = this.resolveGymExerciseId(profileId, requestedId)
+    const result = this.db.prepare(`UPDATE gym_exercises SET name=?,updated_at=?
+      WHERE profile_id=? AND id=? AND name=? AND updated_at=?`).run(name.trim(), updatedAt, profileId, exerciseId, expectedName, expectedUpdatedAt)
+    if (result.changes !== 1) throw gymExerciseConflict('Die Übung wurde zwischenzeitlich geändert. Bitte Bibliothek neu laden.')
+    this.db.prepare('UPDATE gym_template_exercises SET name=? WHERE profile_id=? AND exercise_id=?').run(name.trim(), profileId, exerciseId)
+    this.db.prepare('UPDATE gym_session_exercises SET name=? WHERE profile_id=? AND exercise_id=?').run(name.trim(), profileId, exerciseId)
   }
 
   private insertGymSession(profileId: string, session: GymSession) {
@@ -263,13 +344,19 @@ export class PaceDatabase {
       session.templateName, session.date, session.startedAt, session.completedAt,
     )
     const insert = this.db.prepare(`INSERT INTO gym_session_exercises
-      (profile_id,id,session_id,template_exercise_id,name,sets,weight_kg,reps,position) VALUES (?,?,?,?,?,?,?,?,?)`)
+      (profile_id,id,session_id,template_exercise_id,name,sets,weight_kg,reps,target_reps,target_reps_max,increase_next_time,completed,position,exercise_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     const insertSet = this.db.prepare(`INSERT INTO gym_session_sets
       (profile_id,id,session_exercise_id,set_number,weight_kg,reps) VALUES (?,?,?,?,?,?)`)
-    for (const exercise of session.exercises) insert.run(
-      profileId, exercise.id, session.id, exercise.templateExerciseId ?? null, exercise.name, exercise.sets,
-      exercise.weightKg ?? null, exercise.reps, exercise.position,
-    )
+    for (const exercise of session.exercises) {
+      const templateCanonical = exercise.templateExerciseId
+        ? (this.db.prepare('SELECT exercise_id FROM gym_template_exercises WHERE profile_id=? AND id=?').get(profileId, exercise.templateExerciseId) as Row | undefined)?.exercise_id
+        : undefined
+      const exerciseId = this.ensureGymExercise(profileId, exercise.exerciseId ?? (templateCanonical == null ? undefined : String(templateCanonical)) ?? exercise.templateExerciseId ?? exercise.id, exercise.name, session.startedAt, session.completedAt)
+      const canonicalName = this.gymExerciseName(profileId, exerciseId)
+      insert.run(profileId, exercise.id, session.id, exercise.templateExerciseId ?? null, canonicalName, exercise.sets,
+        exercise.weightKg ?? null, exercise.reps, exercise.targetReps ?? null, exercise.targetRepsMax ?? null,
+        exercise.increaseNextTime ? 1 : 0, exercise.completed ? 1 : 0, exercise.position, exerciseId)
+    }
     for (const exercise of session.exercises) {
       const performedSets = exercise.performedSets ?? Array.from({ length: exercise.sets }, (_, index) => ({
         id: legacyGymSetId(exercise.id, index + 1), setNumber: index + 1, weightKg: exercise.weightKg, reps: exercise.reps,
@@ -397,10 +484,12 @@ function rowToGymTemplate(db: Database.Database, row: Row, profileId: string): G
     updatedAt: normalizeSqlTimestamp(String(row.updated_at)),
     exercises: exercises.map((exercise) => ({
       id: String(exercise.id),
-      name: String(exercise.name),
+      ...(exercise.exercise_id == null ? {} : { exerciseId: String(exercise.exercise_id) }),
+      name: canonicalExerciseName(db, exercise.exercise_id, exercise.name),
       sets: Number(exercise.sets),
       ...(exercise.target_weight_kg == null ? {} : { targetWeightKg: Number(exercise.target_weight_kg) }),
       targetReps: Number(exercise.target_reps),
+      ...(exercise.target_reps_max == null ? {} : { targetRepsMax: Number(exercise.target_reps_max) }),
       position: Number(exercise.position),
     })),
   }
@@ -417,11 +506,16 @@ function rowToGymSession(db: Database.Database, row: Row, profileId: string): Gy
     completedAt: normalizeSqlTimestamp(String(row.completed_at)),
     exercises: exercises.map((exercise) => ({
       id: String(exercise.id),
+      ...(exercise.exercise_id == null ? {} : { exerciseId: String(exercise.exercise_id) }),
       ...(exercise.template_exercise_id == null ? {} : { templateExerciseId: String(exercise.template_exercise_id) }),
-      name: String(exercise.name),
+      name: canonicalExerciseName(db, exercise.exercise_id, exercise.name),
       sets: Number(exercise.sets),
       ...(exercise.weight_kg == null ? {} : { weightKg: Number(exercise.weight_kg) }),
       reps: Number(exercise.reps),
+      ...(exercise.target_reps == null ? {} : { targetReps: Number(exercise.target_reps) }),
+      ...(exercise.target_reps_max == null ? {} : { targetRepsMax: Number(exercise.target_reps_max) }),
+      ...(Number(exercise.increase_next_time) === 1 ? { increaseNextTime: true } : {}),
+      ...(Number(exercise.completed) === 1 ? { completed: true } : {}),
       position: Number(exercise.position),
       performedSets: (db.prepare('SELECT * FROM gym_session_sets WHERE profile_id=? AND session_exercise_id=? ORDER BY set_number').all(profileId, exercise.id) as Row[]).map((set) => ({
         id: String(set.id), setNumber: Number(set.set_number),
@@ -441,4 +535,16 @@ function integrityError() {
   return error
 }
 
-export const EXPECTED_SCHEMA_VERSION = 6
+function gymExerciseConflict(message: string) {
+  const error = new Error(message)
+  Object.assign(error, { code: 'GYM_EXERCISE_CONFLICT' })
+  return error
+}
+
+function canonicalExerciseName(db: Database.Database, exerciseId: unknown, fallback: unknown) {
+  if (exerciseId == null) return String(fallback)
+  const row = db.prepare('SELECT name FROM gym_exercises WHERE id=?').get(exerciseId) as Row | undefined
+  return row ? String(row.name) : String(fallback)
+}
+
+export const EXPECTED_SCHEMA_VERSION = 9
