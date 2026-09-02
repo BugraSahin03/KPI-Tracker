@@ -221,10 +221,10 @@ describe('Pace API', () => {
     }
   })
 
-  it('prüft Health ohne persönliche Daten und meldet Schema 9', async () => {
+  it('prüft Health ohne persönliche Daten und meldet Schema 10', async () => {
     database = new PaceDatabase(':memory:')
     const response = await request(createApp(database, new GoogleHealthService(database))).get('/api/health').expect(200)
-    expect(response.body).toEqual({ status: 'ok', sqliteReady: true, schemaVersion: 9 })
+    expect(response.body).toEqual({ status: 'ok', sqliteReady: true, schemaVersion: 10 })
     expect(JSON.stringify(response.body)).not.toContain('Bugra')
   })
 
@@ -238,9 +238,9 @@ describe('Pace API', () => {
 
   it('liefert bei unerwarteter Schemaversion Health 503', async () => {
     database = new PaceDatabase(':memory:')
-    database.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(10, new Date().toISOString())
+    database.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(11, new Date().toISOString())
     const response = await request(createApp(database, new GoogleHealthService(database))).get('/api/health').expect(503)
-    expect(response.body).toEqual({ status: 'unavailable', sqliteReady: false, schemaVersion: 10 })
+    expect(response.body).toEqual({ status: 'unavailable', sqliteReady: false, schemaVersion: 11 })
   })
 
   it('setzt restriktive Browser-Sicherheitsheader', async () => {
@@ -262,7 +262,26 @@ describe('Pace API', () => {
       const mutation = { id: 'origin-entry', kind: 'entry.set', entry: { goalId: 'protein', date: '2026-08-01', status: 'done', updatedAt: '2026-08-01T12:00:00Z' } }
       await request(app).post('/api/mutations').send(mutation).expect(403)
       await request(app).post('/api/mutations').set('Origin', 'https://evil.example').send(mutation).expect(403)
+      await request(app).post('/api/mutations').set('Origin', 'http://localhost:5173').send(mutation).expect(403)
       await request(app).post('/api/mutations').set('Origin', 'https://pace.example.ts.net').send(mutation).expect(200)
+    } finally {
+      config.production = previousProduction
+      config.publicOrigin = previousOrigin
+    }
+  })
+
+  it('akzeptiert nur die loopback Vite-Origin in der lokalen Entwicklung', async () => {
+    database = new PaceDatabase(':memory:')
+    const previousProduction = config.production
+    const previousOrigin = config.publicOrigin
+    config.production = false
+    config.publicOrigin = undefined
+    try {
+      const app = createApp(database, new GoogleHealthService(database))
+      const mutation = { id: 'dev-origin-entry', kind: 'entry.set', entry: { goalId: 'protein', date: '2026-08-01', status: 'done', updatedAt: '2026-08-01T12:00:00Z' } }
+      await request(app).post('/api/mutations').set('Origin', 'http://localhost:5173').send(mutation).expect(200)
+      await request(app).post('/api/mutations').set('Origin', 'http://127.0.0.1:5173').send({ ...mutation, id: 'dev-origin-loopback-entry' }).expect(200)
+      await request(app).post('/api/mutations').set('Origin', 'https://evil.example').send({ ...mutation, id: 'dev-origin-evil-entry' }).expect(403)
     } finally {
       config.production = previousProduction
       config.publicOrigin = previousOrigin

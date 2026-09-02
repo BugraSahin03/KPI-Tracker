@@ -13,6 +13,24 @@ type AppOptions = {
   timeZone?: string
 }
 
+// Vite proxies /api in local development. The browser therefore sends the
+// frontend origin while Express sees the proxy target as its request host.
+// Keep this allowlist loopback-only and inactive in production.
+const DEVELOPMENT_FRONTEND_ORIGINS = new Set([
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+])
+
+function writeOriginIsAllowed(request: Request, origin: string) {
+  const requestOrigin = `${request.protocol}://${request.get('host')}`
+  const expectedOrigin = config.publicOrigin ?? requestOrigin
+  return origin === expectedOrigin || (
+    !config.production &&
+    config.publicOrigin === undefined &&
+    DEVELOPMENT_FRONTEND_ORIGINS.has(origin)
+  )
+}
+
 export function createApp(database: PaceDatabase, googleHealth: GoogleHealthService, options: AppOptions = {}) {
   const now = options.now ?? (() => new Date())
   const timeZone = options.timeZone ?? config.timeZone
@@ -44,8 +62,7 @@ export function createApp(database: PaceDatabase, googleHealth: GoogleHealthServ
     }
     if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) return next()
     const origin = request.get('origin')
-    const expected = config.publicOrigin ?? `${request.protocol}://${request.get('host')}`
-    if ((config.production && !origin) || (origin && origin !== expected)) return response.status(403).json({ error: 'Anfrage von fremder oder fehlender Herkunft abgelehnt.' })
+    if ((config.production && !origin) || (origin && !writeOriginIsAllowed(request, origin))) return response.status(403).json({ error: 'Anfrage von fremder oder fehlender Herkunft abgelehnt.' })
     return next()
   })
 

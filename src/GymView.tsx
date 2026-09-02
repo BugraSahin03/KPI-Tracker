@@ -1,7 +1,7 @@
 import { ArrowLeft, ArrowRight, BookOpen, Check, ChevronDown, ChevronUp, Dumbbell, Eye, Link2, Pencil, Plus, TrendingUp, Trash2, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { formatShortDate, todayKey } from './lib/date'
+import { formatShortDate, historyDateGroup, todayKey } from './lib/date'
 import { formatDecimalInput, parseDecimalInput } from './lib/decimal'
 import { formatRepTarget, parseRepTarget } from './lib/reps'
 import { isGymSession, legacyGymSetId, makeId } from './lib/storage'
@@ -349,6 +349,22 @@ function loadExpandedExercises(storageKey: string, session: GymSession | null) {
   return new Set(session.exercises[0] ? [session.exercises[0].id] : [])
 }
 
+function loadRepsInputs(storageKey: string, session: GymSession | null) {
+  if (!session) return {}
+  const fallback = Object.fromEntries(session.exercises.flatMap((exercise) =>
+    setsForExercise(exercise).map((set) => [set.id, String(set.reps)])))
+  try {
+    const parsed: unknown = JSON.parse(sessionStorage.getItem(`${storageKey}-reps`) ?? 'null')
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return fallback
+    const setIds = new Set(session.exercises.flatMap((exercise) => setsForExercise(exercise).map((set) => set.id)))
+    const entries = Object.entries(parsed)
+    if (entries.some(([id, value]) => !setIds.has(id) || typeof value !== 'string')) return fallback
+    return { ...fallback, ...Object.fromEntries(entries) }
+  } catch {
+    return fallback
+  }
+}
+
 function validSetWeightInput(value: string) {
   if (value === '') return true
   const parsed = parseDecimalInput(value)
@@ -358,13 +374,13 @@ function validSetWeightInput(value: string) {
 function validSetRepsInput(value: string) {
   if (!/^\d+$/.test(value)) return false
   const parsed = Number(value)
-  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 100
+  return Number.isInteger(parsed) && parsed >= 0 && parsed <= 100
 }
 
 function validDraftExercise(exercise: GymSessionExercise, weightInputs: Record<string, string>, repsInputs: Record<string, string>) {
   return Number.isInteger(exercise.sets) && exercise.sets >= 1 && exercise.sets <= 20 &&
     setsForExercise(exercise).length === exercise.sets && setsForExercise(exercise).every((set) =>
-      Number.isInteger(set.setNumber) && Number.isInteger(set.reps) && set.reps >= 1 && set.reps <= 100 &&
+      Number.isInteger(set.setNumber) && Number.isInteger(set.reps) && set.reps >= 0 && set.reps <= 100 &&
       (set.weightKg === undefined || (Number.isFinite(set.weightKg) && set.weightKg >= 0 && set.weightKg <= 1000)) &&
       validSetWeightInput(weightInputs[set.id] ?? formatDecimalInput(set.weightKg)) &&
       validSetRepsInput(repsInputs[set.id] ?? String(set.reps)))
@@ -453,6 +469,90 @@ function exerciseWeightSummary(exercise: GymSessionExercise) {
   return `${compact} kg`
 }
 
+type GymHistoryWeek = { key: string; label: string; sessions: GymSession[] }
+type GymHistoryMonth = { key: string; label: string; weeks: GymHistoryWeek[] }
+type GymHistoryYear = { key: string; months: GymHistoryMonth[] }
+
+function groupGymHistory(sessions: GymSession[]): GymHistoryYear[] {
+  const years: GymHistoryYear[] = []
+  for (const session of sessions) {
+    const group = historyDateGroup(session.date)
+    let year = years.at(-1)
+    if (year?.key !== group.calendarYear) {
+      year = { key: group.calendarYear, months: [] }
+      years.push(year)
+    }
+    let month = year.months.at(-1)
+    if (month?.key !== group.monthKey) {
+      month = { key: group.monthKey, label: group.monthLabel, weeks: [] }
+      year.months.push(month)
+    }
+    let week = month.weeks.at(-1)
+    if (week?.key !== group.isoWeekKey) {
+      week = { key: group.isoWeekKey, label: group.isoWeekLabel, sessions: [] }
+      month.weeks.push(week)
+    }
+    week.sessions.push(session)
+  }
+  return years
+}
+
+function defaultOpenHistoryMonth(sessions: GymSession[], currentDate = todayKey()) {
+  const currentMonth = currentDate.slice(0, 7)
+  if (sessions.some((session) => session.date.slice(0, 7) === currentMonth)) return currentMonth
+  return sessions.reduce<string | null>((latest, session) => {
+    const month = session.date.slice(0, 7)
+    return latest === null || month > latest ? month : latest
+  }, null)
+}
+
+function exerciseHistoryKey(exercise: GymSessionExercise) {
+  return exercise.exerciseId ?? exercise.templateExerciseId
+}
+
+function gymSessionCompletionTime(session: GymSession) {
+  const completed = Date.parse(session.completedAt)
+  if (Number.isFinite(completed)) return completed
+  const started = Date.parse(session.startedAt)
+  if (Number.isFinite(started)) return started
+  return Date.parse(`${session.date}T23:59:59`)
+}
+
+function exerciseWeightIncreased(current: GymSessionExercise, previous: GymSessionExercise) {
+  const currentSets = historicalSetsByNumber(current)
+  const previousSets = historicalSetsByNumber(previous)
+  const comparableSetCount = Math.min(current.sets, previous.sets)
+  if (comparableSetCount < 1) return false
+  let increased = false
+  for (let setNumber = 1; setNumber <= comparableSetCount; setNumber++) {
+    const currentWeight = currentSets.get(setNumber)?.weightKg
+    const previousWeight = previousSets.get(setNumber)?.weightKg
+    if (currentWeight === undefined || previousWeight === undefined || !Number.isFinite(currentWeight) || !Number.isFinite(previousWeight)) return false
+    if (currentWeight < previousWeight) return false
+    if (currentWeight > previousWeight) increased = true
+  }
+  return increased
+}
+
+function historicalWeightIncreases(sessions: GymSession[]) {
+  const increased = new Set<string>()
+  const previousByExercise = new Map<string, GymSessionExercise>()
+  const chronological = [...sessions].sort((a, b) =>
+    a.date.localeCompare(b.date) || gymSessionCompletionTime(a) - gymSessionCompletionTime(b) || a.startedAt.localeCompare(b.startedAt) || a.id.localeCompare(b.id))
+  for (const session of chronological) {
+    const updates = new Map<string, GymSessionExercise>()
+    for (const exercise of session.exercises) {
+      const key = exerciseHistoryKey(exercise)
+      if (!key) continue
+      const previous = previousByExercise.get(key)
+      if (previous && exerciseWeightIncreased(exercise, previous)) increased.add(`${session.id}\u0000${exercise.id}`)
+      updates.set(key, exercise)
+    }
+    for (const [key, exercise] of updates) previousByExercise.set(key, exercise)
+  }
+  return increased
+}
+
 export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_STORAGE_KEY, onEditorDirtyChange }: GymViewProps) {
   const library = useMemo<GymExercise[]>(() => data.gymExercises?.length ? data.gymExercises : data.gymTemplates.flatMap((template) => template.exercises.map((exercise) => ({
     id: exercise.exerciseId ?? exercise.id, name: exercise.name, createdAt: template.createdAt, updatedAt: template.updatedAt,
@@ -463,14 +563,22 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
     initialDraft?.exercises.flatMap((exercise) => setsForExercise(exercise).map((set) => [set.id, formatDecimalInput(set.weightKg)])) ?? [],
   ))
   const [setRepsInputs, setSetRepsInputs] = useState<Record<string, string>>(() => Object.fromEntries(
-    initialDraft?.exercises.flatMap((exercise) => setsForExercise(exercise).map((set) => [set.id, String(set.reps)])) ?? [],
+    Object.entries(loadRepsInputs(draftStorageKey, initialDraft)),
   ))
+  const [repsValidationRequested, setRepsValidationRequested] = useState<Set<string>>(new Set())
   const [expandedExerciseIds, setExpandedExerciseIds] = useState<Set<string>>(() => loadExpandedExercises(draftStorageKey, initialDraft))
   const [editingTemplate, setEditingTemplate] = useState<GymTemplate | 'new' | null>(null)
   const [pendingTemplate, setPendingTemplate] = useState<GymTemplate | null>(null)
   const [view, setView] = useState<'landing' | 'history' | 'manage' | 'library'>('landing')
   const [mergeSourceId, setMergeSourceId] = useState<string | null>(null)
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null)
+  const [openHistoryMonths, setOpenHistoryMonths] = useState<Set<string>>(() => {
+    const defaultMonth = defaultOpenHistoryMonth(data.gymSessions)
+    return new Set(defaultMonth ? [defaultMonth] : [])
+  })
+  const currentHistoryMonth = todayKey().slice(0, 7)
+  const currentHistoryMonthAvailable = data.gymSessions.some((session) => session.date.slice(0, 7) === currentHistoryMonth)
+  const hadCurrentHistoryMonthRef = useRef(currentHistoryMonthAvailable)
   const [finishRequested, setFinishRequested] = useState(false)
   const [isCompleting, setIsCompleting] = useState(false)
   const completingRef = useRef(false)
@@ -491,8 +599,21 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
   }, [draft, draftStorageKey, expandedExerciseIds])
 
   useEffect(() => {
+    const key = `${draftStorageKey}-reps`
+    if (draft) sessionStorage.setItem(key, JSON.stringify(setRepsInputs))
+    else sessionStorage.removeItem(key)
+  }, [draft, draftStorageKey, setRepsInputs])
+
+  useEffect(() => {
     if (activeSessionId) activeTitleRef.current?.focus()
   }, [activeSessionId])
+
+  useEffect(() => {
+    if (currentHistoryMonthAvailable && !hadCurrentHistoryMonthRef.current) {
+      setOpenHistoryMonths((current) => new Set([...current, currentHistoryMonth]))
+    }
+    hadCurrentHistoryMonthRef.current = currentHistoryMonthAvailable
+  }, [currentHistoryMonth, currentHistoryMonthAvailable])
 
   const requestStart = (template: GymTemplate) => {
     if (template.exercises.length === 0) {
@@ -541,7 +662,8 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
       }
     })
     setSetWeightInputs(Object.fromEntries(exercises.flatMap((exercise) => setsForExercise(exercise).map((set) => [set.id, formatDecimalInput(set.weightKg)]))))
-    setSetRepsInputs(Object.fromEntries(exercises.flatMap((exercise) => setsForExercise(exercise).map((set) => [set.id, String(set.reps)]))))
+    setSetRepsInputs(Object.fromEntries(exercises.flatMap((exercise) => setsForExercise(exercise).map((set) => [set.id, '']))))
+    setRepsValidationRequested(new Set())
     setExpandedExerciseIds(new Set(exercises[0] ? [exercises[0].id] : []))
     setDraft({
       id: makeId('gym-session'),
@@ -589,6 +711,7 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
     setDraft(null)
     sessionStorage.removeItem(draftStorageKey)
     sessionStorage.removeItem(`${draftStorageKey}-expanded`)
+    sessionStorage.removeItem(`${draftStorageKey}-reps`)
     window.setTimeout(() => {
       completingRef.current = false
       setIsCompleting(false)
@@ -646,7 +769,9 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
   }
   const closeTemplate = useCallback(() => setEditingTemplate(null), [])
   const sortedSessions = useMemo(() => [...data.gymSessions].sort((a, b) =>
-    b.date.localeCompare(a.date) || b.completedAt.localeCompare(a.completedAt)), [data.gymSessions])
+    b.date.localeCompare(a.date) || gymSessionCompletionTime(b) - gymSessionCompletionTime(a) || b.id.localeCompare(a.id)), [data.gymSessions])
+  const historyGroups = useMemo(() => groupGymHistory(sortedSessions), [sortedSessions])
+  const weightIncreases = useMemo(() => historicalWeightIncreases(data.gymSessions), [data.gymSessions])
   const previousByTemplateExercise = useMemo(() => {
     return latestExercisesByTemplateId([...data.gymSessions], draft?.startedAt ?? new Date().toISOString())
   }, [data.gymSessions, draft])
@@ -660,9 +785,19 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
     })
   }
 
+  const toggleHistoryMonth = (monthKey: string) => {
+    setOpenHistoryMonths((current) => {
+      const next = new Set(current)
+      if (next.has(monthKey)) next.delete(monthKey)
+      else next.add(monthKey)
+      return next
+    })
+  }
+
   const requestFinish = () => {
     const invalidExercise = draft?.exercises.find((exercise) => !validDraftExercise(exercise, setWeightInputs, setRepsInputs))
     if (invalidExercise) {
+      setRepsValidationRequested((current) => new Set([...current, invalidExercise.id]))
       setExpandedExerciseIds((current) => new Set([...current, invalidExercise.id]))
       window.setTimeout(() => document.querySelector<HTMLElement>(`[data-exercise-id="${invalidExercise.id}"] [aria-invalid="true"], [data-exercise-id="${invalidExercise.id}"] input:invalid`)?.focus(), 0)
       return
@@ -700,35 +835,74 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
             <span aria-hidden="true" />
           </header>
           <div className="gym-history-list">
-            {sortedSessions.map((session) => {
-              const expanded = expandedSessionId === session.id
-              return (
-                <article className="gym-history-card" key={session.id}>
-                  <button type="button" className="gym-history-summary" aria-expanded={expanded} onClick={() => setExpandedSessionId(expanded ? null : session.id)}>
-                    <time dateTime={session.date}>{formatShortDate(session.date)}</time>
-                    <span><strong>{session.templateName}</strong><small>{session.exercises.length} {session.exercises.length === 1 ? 'Übung' : 'Übungen'}</small></span>
-                    {expanded ? <ChevronUp /> : <ChevronDown />}
-                  </button>
-                  {expanded && (
-                    <div className="gym-history-details">
-                      {session.exercises.map((exercise) => (
-                        <div className="gym-history-exercise" key={exercise.id}>
-                          <strong>{exercise.name}</strong>
-                          <div className="gym-history-sets">
-                            {Array.from({ length: exercise.sets }, (_, index) => {
-                              const setNumber = index + 1
-                              const set = historicalSetsByNumber(exercise).get(setNumber)
-                              return <span key={set?.id ?? legacyGymSetId(exercise.id, setNumber)}><b>Satz {setNumber}</b>{set ? <>{set.weightKg === undefined ? 'Nicht erfasst' : `${set.weightKg.toLocaleString('de-DE')} kg`} · {set.reps} Wdh.</> : 'Nicht erfasst'}</span>
-                            })}
-                          </div>
+            {historyGroups.map((year) => (
+              <section className="gym-history-year" key={year.key} aria-labelledby={`gym-history-year-${year.key}`}>
+                <h2 id={`gym-history-year-${year.key}`}>{year.key}</h2>
+                {year.months.map((month) => {
+                  const expanded = openHistoryMonths.has(month.key)
+                  const sessionCount = month.weeks.reduce((count, week) => count + week.sessions.length, 0)
+                  const contentId = `gym-history-month-content-${month.key}`
+                  return (
+                  <section className={`gym-history-month${expanded ? ' is-expanded' : ''}`} key={month.key} aria-labelledby={`gym-history-month-${month.key}`}>
+                    <h3 className="gym-history-month-heading" id={`gym-history-month-${month.key}`} aria-label={month.label}>
+                      <button type="button" className="gym-history-month-toggle" aria-expanded={expanded} aria-controls={contentId} onClick={() => toggleHistoryMonth(month.key)}>
+                        <span className="gym-history-month-name">{month.label}</span>
+                        <span className="gym-history-month-count">{sessionCount} {sessionCount === 1 ? 'Einheit' : 'Einheiten'}</span>
+                        {expanded ? <ChevronUp aria-hidden="true" /> : <ChevronDown aria-hidden="true" />}
+                      </button>
+                    </h3>
+                    <div className="gym-history-month-content" id={contentId} hidden={!expanded}>
+                    {month.weeks.map((week) => (
+                      <section className="gym-history-week" key={`${month.key}-${week.key}`} aria-labelledby={`gym-history-week-${month.key}-${week.key}`}>
+                        <div className="gym-history-week-head">
+                          <h4 id={`gym-history-week-${month.key}-${week.key}`}>{week.label}</h4>
+                          <span>{week.sessions.length} {week.sessions.length === 1 ? 'Einheit' : 'Einheiten'}</span>
                         </div>
-                      ))}
-                      <button type="button" className="link-button danger" onClick={() => removeSession(session)}><Trash2 /> Training löschen</button>
+                        <div className="gym-history-week-list">
+                          {week.sessions.map((session) => {
+                            const expanded = expandedSessionId === session.id
+                            return (
+                              <article className="gym-history-card" key={session.id}>
+                                <button type="button" className="gym-history-summary" aria-expanded={expanded} onClick={() => setExpandedSessionId(expanded ? null : session.id)}>
+                                  <time dateTime={session.date}>{formatShortDate(session.date)}</time>
+                                  <span><strong>{session.templateName}</strong><small>{session.exercises.length} {session.exercises.length === 1 ? 'Übung' : 'Übungen'}</small></span>
+                                  {expanded ? <ChevronUp /> : <ChevronDown />}
+                                </button>
+                                {expanded && (
+                                  <div className="gym-history-details">
+                                    {session.exercises.map((exercise) => {
+                                      const didIncrease = weightIncreases.has(`${session.id}\u0000${exercise.id}`)
+                                      return (
+                                        <div className="gym-history-exercise" key={exercise.id}>
+                                          <div className="gym-history-exercise-title">
+                                            <strong>{exercise.name}</strong>
+                                            {didIncrease && <span className="gym-history-increase" title="Gewicht gegenüber dem vorherigen Training gesteigert"><TrendingUp aria-hidden="true" /><span>Gesteigert</span></span>}
+                                          </div>
+                                          <div className="gym-history-sets">
+                                            {Array.from({ length: exercise.sets }, (_, index) => {
+                                              const setNumber = index + 1
+                                              const set = historicalSetsByNumber(exercise).get(setNumber)
+                                              return <span key={set?.id ?? legacyGymSetId(exercise.id, setNumber)}><b>Satz {setNumber}</b>{set ? <>{set.weightKg === undefined ? 'Nicht erfasst' : `${set.weightKg.toLocaleString('de-DE')} kg`} · {set.reps} Wdh.</> : 'Nicht erfasst'}</span>
+                                            })}
+                                          </div>
+                                        </div>
+                                      )
+                                    })}
+                                    <button type="button" className="link-button danger" onClick={() => removeSession(session)}><Trash2 /> Training löschen</button>
+                                  </div>
+                                )}
+                              </article>
+                            )
+                          })}
+                        </div>
+                      </section>
+                    ))}
                     </div>
-                  )}
-                </article>
-              )
-            })}
+                  </section>
+                  )
+                })}
+              </section>
+            ))}
             {sortedSessions.length === 0 && <div className="empty-state compact"><Dumbbell /><h2>Noch kein Training</h2><p>Deine abgeschlossenen Einheiten erscheinen hier.</p></div>}
           </div>
         </section>
@@ -800,7 +974,7 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
                     const weightInput = setWeightInputs[set.id] ?? formatDecimalInput(set.weightKg)
                     const repsInput = setRepsInputs[set.id] ?? String(set.reps)
                     const weightInvalid = !validSetWeightInput(weightInput)
-                    const repsInvalid = !validSetRepsInput(repsInput)
+                    const repsInvalid = (repsInput !== '' || repsValidationRequested.has(exercise.id)) && !validSetRepsInput(repsInput)
                     const weightErrorId = `${set.id}-weight-error`
                     const repsErrorId = `${set.id}-reps-error`
                     return <div className="gym-set-row" key={set.id}>
@@ -814,20 +988,30 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
                       }} onBlur={() => {
                         if (validSetWeightInput(weightInput)) setSetWeightInputs((current) => ({ ...current, [set.id]: formatDecimalInput(set.weightKg) }))
                       }} placeholder="kg" />{weightInput !== '' && <span className="gym-metric-suffix" aria-hidden="true">kg</span>}</label>
-                      <label className={`gym-metric-control reps${repsInvalid ? ' invalid' : ''}`}><input required aria-label={`${exercise.name} Satz ${set.setNumber} Wiederholungen`} aria-invalid={repsInvalid} aria-describedby={repsInvalid ? repsErrorId : undefined} type="number" min="1" max="100" inputMode="numeric" value={repsInput} onChange={(event) => {
+                      <label className={`gym-metric-control reps${repsInvalid ? ' invalid' : ''}`}><input aria-label={`${exercise.name} Satz ${set.setNumber} Wiederholungen`} aria-invalid={repsInvalid} aria-describedby={repsInvalid ? repsErrorId : undefined} type="number" min="0" max="100" inputMode="numeric" value={repsInput} onChange={(event) => {
                         const value = event.target.value
                         setSetRepsInputs((current) => ({ ...current, [set.id]: value }))
                         if (validSetRepsInput(value)) updateSet(exercise.id, set.id, { reps: Number(value) })
                       }} /><span className="gym-metric-suffix" aria-hidden="true">Wdh.</span></label>
                       <div className="gym-set-feedback">
                         {weightInvalid && <small id={weightErrorId} className="gym-set-error" role="alert">Gewicht muss zwischen 0 und 1.000 kg liegen.</small>}
-                        {repsInvalid && <small id={repsErrorId} className="gym-set-error" role="alert">Wiederholungen müssen zwischen 1 und 100 liegen.</small>}
+                        {repsInvalid && <small id={repsErrorId} className="gym-set-error" role="alert">Wiederholungen müssen zwischen 0 und 100 liegen.</small>}
                         {!weightInvalid && !repsInvalid && <small>{previousSet ? <>Letztes Mal: <b>{previousSet.weightKg === undefined ? 'Nicht erfasst' : `${previousSet.weightKg.toLocaleString('de-DE')} kg`} × {previousSet.reps}</b></> : 'Noch kein Vergleich'}</small>}
                       </div>
                     </div>
                   })}
                   <div className="gym-exercise-options" aria-label={`Optionen für ${exercise.name}`}>
-                    <label><input type="checkbox" aria-label={`${exercise.name} als erledigt markieren`} checked={Boolean(exercise.completed)} onChange={(event) => updateExercise(exercise.id, { completed: event.target.checked })} /><span><Check /> Übung erledigt</span></label>
+                    <label><input type="checkbox" aria-label={`${exercise.name} als erledigt markieren`} checked={Boolean(exercise.completed)} onChange={(event) => {
+                      if (!event.target.checked) { updateExercise(exercise.id, { completed: false }); return }
+                      const invalidSet = setsForExercise(exercise).find((set) => !validSetRepsInput(setRepsInputs[set.id] ?? String(set.reps)))
+                      if (invalidSet) {
+                        setRepsValidationRequested((current) => new Set([...current, exercise.id]))
+                        setExpandedExerciseIds((current) => new Set([...current, exercise.id]))
+                        window.setTimeout(() => document.querySelector<HTMLElement>(`[data-exercise-id="${exercise.id}"] [aria-invalid="true"]`)?.focus(), 0)
+                        return
+                      }
+                      updateExercise(exercise.id, { completed: true })
+                    }} /><span><Check /> Übung erledigt</span></label>
                     <label><input type="checkbox" aria-label={`${exercise.name}: nächstes Mal Gewicht steigern`} checked={Boolean(exercise.increaseNextTime)} onChange={(event) => updateExercise(exercise.id, { increaseNextTime: event.target.checked })} /><span><TrendingUp /> Nächstes Mal steigern</span></label>
                   </div>
                 </div>

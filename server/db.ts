@@ -547,4 +547,4 @@ function canonicalExerciseName(db: Database.Database, exerciseId: unknown, fallb
   return row ? String(row.name) : String(fallback)
 }
 
-export const EXPECTED_SCHEMA_VERSION = 9
+export const EXPECTED_SCHEMA_VERSION = 10

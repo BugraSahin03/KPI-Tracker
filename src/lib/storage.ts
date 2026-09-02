@@ -195,9 +195,10 @@ function orderedUniqueExercises(
 
 function validExerciseNumbers(value: Record<string, unknown>, weightKey: 'targetWeightKg' | 'weightKg') {
   const weight = value[weightKey]
+  const minimumReps = weightKey === 'targetWeightKg' ? 1 : 0
   return Number.isInteger(value.sets) && Number(value.sets) >= 1 && Number(value.sets) <= 20 &&
     Number.isInteger(value[weightKey === 'targetWeightKg' ? 'targetReps' : 'reps']) &&
-    Number(value[weightKey === 'targetWeightKg' ? 'targetReps' : 'reps']) >= 1 &&
+    Number(value[weightKey === 'targetWeightKg' ? 'targetReps' : 'reps']) >= minimumReps &&
     Number(value[weightKey === 'targetWeightKg' ? 'targetReps' : 'reps']) <= 100 &&
     (weight === undefined || (typeof weight === 'number' && Number.isFinite(weight) && weight >= 0 && weight <= 1000))
 }
@@ -236,7 +237,7 @@ export function isGymSession(value: unknown): value is GymSession {
       (exercise.performedSets === undefined || (Array.isArray(exercise.performedSets) &&
         exercise.performedSets.length === exercise.sets && exercise.performedSets.every((set, index) =>
           isRecord(set) && isIdentifier(set.id) && set.setNumber === index + 1 &&
-          Number.isInteger(set.reps) && Number(set.reps) >= 1 && Number(set.reps) <= 100 &&
+          Number.isInteger(set.reps) && Number(set.reps) >= 0 && Number(set.reps) <= 100 &&
           (set.weightKg === undefined || (typeof set.weightKg === 'number' && Number.isFinite(set.weightKg) && set.weightKg >= 0 && set.weightKg <= 1000))) &&
         new Set(exercise.performedSets.map((set) => isRecord(set) ? set.id : '')).size === exercise.performedSets.length)))
   if (!valid) return false

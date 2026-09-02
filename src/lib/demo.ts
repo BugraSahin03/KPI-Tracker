@@ -95,11 +95,15 @@ export function createDemoData(anchor = new Date()): AppData {
   }
 
   const gymSessions: GymSession[] = []
-  for (let offset = 10; offset <= Math.min(totalDays, 84); offset += 3) {
+  const oldestGymOffset = Math.min(totalDays, 84)
+  for (let offset = 10; offset <= oldestGymOffset; offset += 3) {
     const sessionDate = new Date(normalizedAnchor)
     sessionDate.setDate(sessionDate.getDate() - offset)
     const template = data.gymTemplates[gymSessions.length % data.gymTemplates.length]!
     const date = toDateKey(sessionDate)
+    // Each plan returns every nine days. Advancing the weight every second visit
+    // creates realistic plateaus as well as visible, deterministic progression.
+    const progressionLevel = Math.floor((oldestGymOffset - offset) / 18)
     gymSessions.push({
       id: `demo-session-${date}`,
       templateId: template.id,
@@ -107,14 +111,19 @@ export function createDemoData(anchor = new Date()): AppData {
       date,
       startedAt: `${date}T17:30:00.000Z`,
       completedAt: `${date}T18:35:00.000Z`,
-      exercises: template.exercises.map((exercise) => ({
-        id: `demo-session-${date}-${exercise.position}`, templateExerciseId: exercise.id, exerciseId: exercise.exerciseId, name: exercise.name,
-        sets: exercise.sets, weightKg: demoWeights.get(exercise.id), reps: exercise.targetReps, position: exercise.position,
-        performedSets: Array.from({ length: exercise.sets }, (_, index) => ({
-          id: `demo-session-${date}-${exercise.position}-set-${index + 1}`, setNumber: index + 1,
-          weightKg: demoWeights.get(exercise.id), reps: exercise.targetReps,
-        })),
-      })),
+      exercises: template.exercises.map((exercise) => {
+        const baseline = demoWeights.get(exercise.id)!
+        const increment = baseline >= 100 ? 5 : baseline >= 50 ? 2.5 : 1.25
+        const weightKg = baseline + progressionLevel * increment
+        return {
+          id: `demo-session-${date}-${exercise.position}`, templateExerciseId: exercise.id, exerciseId: exercise.exerciseId, name: exercise.name,
+          sets: exercise.sets, weightKg, reps: exercise.targetReps, position: exercise.position,
+          performedSets: Array.from({ length: exercise.sets }, (_, index) => ({
+            id: `demo-session-${date}-${exercise.position}-set-${index + 1}`, setNumber: index + 1,
+            weightKg, reps: exercise.targetReps,
+          })),
+        }
+      }),
     })
   }
 

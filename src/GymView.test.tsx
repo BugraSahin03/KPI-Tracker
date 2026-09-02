@@ -5,6 +5,7 @@ import { useState } from 'react'
 import GymView from './GymView'
 import './App.css'
 import { todayKey } from './lib/date'
+import { createDemoData } from './lib/demo'
 import { createInitialData, legacyGymSetId } from './lib/storage'
 import type { AppData, GymSession } from './types'
 
@@ -27,9 +28,17 @@ function session(id: string, date: string, name = 'Push'): GymSession {
   }
 }
 
+async function fillEmptyReps(user: ReturnType<typeof userEvent.setup>, value = '8') {
+  void user
+  for (const input of document.querySelectorAll<HTMLInputElement>('input[type="number"][aria-label*=" Satz "][aria-label$=" Wiederholungen"]')) {
+    if (input.value === '') fireEvent.change(input, { target: { value } })
+  }
+}
+
 afterEach(() => {
   cleanup()
   sessionStorage.clear()
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -58,8 +67,9 @@ describe('GYM-Workflow', () => {
 
     await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
     expect(screen.getByRole('heading', { name: 'Verlauf' })).toBeInTheDocument()
-    const dates = screen.getAllByRole('time').map((node) => node.textContent)
-    expect(dates).toEqual(['01.08.26', '01.07.26'])
+    expect(screen.getByRole('button', { name: /August.*1 Einheit/ })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: /Juli.*1 Einheit/ })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getAllByRole('time').map((node) => node.textContent)).toEqual(['01.08.26'])
     await user.click(screen.getByRole('button', { name: /01.08.26/ }))
     expect(screen.getAllByText(/72,5 kg/)).toHaveLength(3)
     await user.click(screen.getByRole('button', { name: 'Training löschen' }))
@@ -74,6 +84,197 @@ describe('GYM-Workflow', () => {
     render(<Harness initial={withPushExercise()} />)
     await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
     expect(screen.getByRole('heading', { name: 'Noch kein Training' })).toBeInTheDocument()
+  })
+
+  it('gliedert den Verlauf absteigend nach Kalenderjahr, Monat und ISO-Kalenderwoche', async () => {
+    const user = userEvent.setup()
+    const data = withPushExercise()
+    data.gymSessions = [
+      session('december', '2025-12-31'),
+      session('january-one', '2026-01-01'),
+      session('january-two', '2026-01-08'),
+    ]
+    render(<Harness initial={data} />)
+
+    await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
+    const yearHeadings = screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent)
+    expect(yearHeadings).toEqual(['2026', '2025'])
+    expect(screen.getAllByRole('heading', { name: 'Januar', level: 3 })).toHaveLength(1)
+    expect(screen.getByRole('heading', { name: 'Dezember', level: 3 })).toBeInTheDocument()
+    expect(screen.getAllByRole('heading', { name: 'KW 1', level: 4 })).toHaveLength(1)
+    expect(screen.getByRole('heading', { name: 'KW 2', level: 4 })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /Dezember.*1 Einheit/ }))
+    expect(screen.getByRole('heading', { name: 'KW 1 · 2026', level: 4 })).toBeInTheDocument()
+    expect(screen.getAllByRole('time').map((node) => node.textContent)).toEqual(['08.01.26', '01.01.26', '31.12.25'])
+  })
+
+  it('öffnet standardmäßig nur den aktuellen Monat und lässt mehrere Monate unabhängig geöffnet', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.setSystemTime(new Date(2026, 7, 20, 12))
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    const data = withPushExercise()
+    data.gymSessions = [
+      session('august-one', '2026-08-01'),
+      session('august-two', '2026-08-15'),
+      session('july', '2026-07-20'),
+    ]
+    render(<Harness initial={data} />)
+
+    await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
+    const august = screen.getByRole('button', { name: /August.*2 Einheiten/ })
+    const july = screen.getByRole('button', { name: /Juli.*1 Einheit/ })
+    expect(august).toHaveAttribute('aria-expanded', 'true')
+    expect(july).toHaveAttribute('aria-expanded', 'false')
+    expect(august).toHaveAttribute('aria-controls', 'gym-history-month-content-2026-08')
+    expect(document.getElementById('gym-history-month-content-2026-08')).not.toHaveAttribute('hidden')
+    expect(document.getElementById('gym-history-month-content-2026-07')).toHaveAttribute('hidden')
+    expect(august.closest('.gym-history-month')).toHaveClass('is-expanded')
+    expect(july.closest('.gym-history-month')).not.toHaveClass('is-expanded')
+
+    await user.click(july)
+    expect(august).toHaveAttribute('aria-expanded', 'true')
+    expect(july).toHaveAttribute('aria-expanded', 'true')
+    expect(july.closest('.gym-history-month')).toHaveClass('is-expanded')
+    expect(screen.getAllByRole('time')).toHaveLength(3)
+    await user.click(august)
+    expect(august).toHaveAttribute('aria-expanded', 'false')
+    expect(july).toHaveAttribute('aria-expanded', 'true')
+    expect(august.closest('.gym-history-month')).not.toHaveClass('is-expanded')
+
+    await user.click(screen.getByRole('button', { name: 'Zurück zu GYM' }))
+    await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
+    expect(screen.getByRole('button', { name: /August.*2 Einheiten/ })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('button', { name: /Juli.*1 Einheit/ })).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('öffnet bei fehlendem aktuellem Monat den neuesten vorhandenen Monat auch über einen Jahreswechsel', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.setSystemTime(new Date(2026, 2, 5, 12))
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    const data = withPushExercise()
+    data.gymSessions = [session('december', '2025-12-31'), session('january', '2026-01-02')]
+    render(<Harness initial={data} />)
+
+    await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
+    expect(screen.getByRole('button', { name: /Januar.*1 Einheit/ })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: /Dezember.*1 Einheit/ })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getAllByRole('time').map((node) => node.textContent)).toEqual(['02.01.26'])
+  })
+
+  it('öffnet den aktuellen Monat, sobald dort erstmals ein Training entsteht, ohne manuelle Monatszustände zurückzusetzen', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.setSystemTime(new Date(2026, 2, 5, 12))
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    const data = withPushExercise()
+    data.gymSessions = [session('january', '2026-01-02')]
+    render(<Harness initial={data} />)
+
+    await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
+    const january = screen.getByRole('button', { name: /Januar.*1 Einheit/ })
+    expect(january).toHaveAttribute('aria-expanded', 'true')
+    await user.click(january)
+    expect(january).toHaveAttribute('aria-expanded', 'false')
+
+    await user.click(screen.getByRole('button', { name: 'Zurück zu GYM' }))
+    await user.click(screen.getByRole('button', { name: 'Push starten' }))
+    await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    await fillEmptyReps(user)
+    await user.click(screen.getByRole('button', { name: 'Training beenden' }))
+    await user.click(within(screen.getByRole('dialog', { name: 'Training beenden' })).getByRole('button', { name: 'Training beenden' }))
+    await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
+
+    expect(screen.getByRole('button', { name: /März.*1 Einheit/ })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: /Januar.*1 Einheit/ })).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('markiert echte Gewichtssteigerungen über kanonisch verknüpfte Einheiten hinweg konservativ', async () => {
+    const user = userEvent.setup()
+    const data = withPushExercise()
+    const weighted = (id: string, date: string, templateExerciseId: string, weights: Array<number | undefined>, increaseNextTime = false): GymSession => ({
+      id,
+      templateId: id.startsWith('upper') ? 'upper' : 'fullbody',
+      templateName: id.startsWith('upper') ? 'Upper' : 'Fullbody',
+      date,
+      startedAt: `${date}T17:00:00.000Z`,
+      completedAt: `${date}T18:00:00.000Z`,
+      exercises: [{
+        id: `${id}-curl`, exerciseId: 'canonical-curl', templateExerciseId, name: 'Bizeps Curls', sets: weights.length,
+        reps: 8, position: 0, increaseNextTime,
+        performedSets: weights.map((weightKg, index) => ({
+          id: `${id}-set-${index + 1}`, setNumber: index + 1, ...(weightKg === undefined ? {} : { weightKg }), reps: 8,
+        })),
+      }],
+    })
+    data.gymSessions = [
+      weighted('upper-base', '2026-07-01', 'upper-curl', [10, 10]),
+      weighted('fullbody-up', '2026-07-08', 'fullbody-curl', [12, 12]),
+      weighted('upper-mixed', '2026-07-15', 'upper-curl', [14, 10]),
+      weighted('fullbody-missing', '2026-07-22', 'fullbody-curl', [16, undefined]),
+      weighted('upper-equal-flagged', '2026-07-29', 'upper-curl', [16, 10], true),
+    ]
+    render(<Harness initial={data} />)
+
+    await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
+    await user.click(screen.getByRole('button', { name: /08.07.26/ }))
+    expect(screen.getByText('Gesteigert').closest('[title]')).toHaveAttribute('title', 'Gewicht gegenüber dem vorherigen Training gesteigert')
+
+    await user.click(screen.getByRole('button', { name: /15.07.26/ }))
+    expect(screen.queryByText('Gesteigert')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /22.07.26/ }))
+    expect(screen.queryByText('Gesteigert')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /29.07.26/ }))
+    expect(screen.queryByText('Gesteigert')).not.toBeInTheDocument()
+  })
+
+  it('unterstützt Legacy-Historie über die stabile Template-Übung, aber verbindet nicht nur nach Namen', async () => {
+    const user = userEvent.setup()
+    const data = withPushExercise()
+    const base = session('legacy-base', '2026-06-01')
+    const increased = session('legacy-up', '2026-06-08')
+    increased.exercises[0] = { ...increased.exercises[0]!, weightKg: 75 }
+    const sameNameOtherExercise = session('other-row', '2026-06-15')
+    sameNameOtherExercise.exercises[0] = { ...sameNameOtherExercise.exercises[0]!, templateExerciseId: 'other-bench-row', weightKg: 80 }
+    data.gymSessions = [base, increased, sameNameOtherExercise]
+    render(<Harness initial={data} />)
+
+    await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
+    await user.click(screen.getByRole('button', { name: /08.06.26/ }))
+    expect(screen.getByText('Gesteigert')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /15.06.26/ }))
+    expect(screen.queryByText('Gesteigert')).not.toBeInTheDocument()
+  })
+
+  it('macht die Gewichtsprogression auch in der visuellen Demo sichtbar', async () => {
+    const user = userEvent.setup()
+    render(<Harness initial={createDemoData(new Date(2026, 7, 27, 12))} />)
+
+    await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
+    await user.click(screen.getByRole('button', { name: /17.08.26/ }))
+    expect(screen.getAllByText('Gesteigert')).toHaveLength(2)
+  })
+
+  it('vergleicht nach Trainingstag und innerhalb desselben Tages nach Abschlusszeit', async () => {
+    const user = userEvent.setup()
+    const data = withPushExercise()
+    const morning = session('morning', '2026-01-02', 'Morgens')
+    morning.completedAt = '2026-08-01T08:00:00.000Z'
+    morning.exercises[0] = { ...morning.exercises[0]!, weightKg: 70 }
+    const evening = session('evening', '2026-01-02', 'Abends')
+    evening.completedAt = '2026-08-01T18:00:00.000Z'
+    evening.exercises[0] = { ...evening.exercises[0]!, weightKg: 72.5 }
+    const nextDay = session('next-day', '2026-01-03', 'Folgetag')
+    nextDay.completedAt = '2026-01-03T18:00:00.000Z'
+    nextDay.exercises[0] = { ...nextDay.exercises[0]!, weightKg: 75 }
+    data.gymSessions = [nextDay, morning, evening]
+    render(<Harness initial={data} />)
+
+    await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
+    expect(screen.getAllByRole('time').map((node) => node.textContent)).toEqual(['03.01.26', '02.01.26', '02.01.26'])
+
+    await user.click(screen.getByRole('button', { name: /Abends/ }))
+    expect(screen.getByText('Gesteigert')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /Folgetag/ }))
+    expect(screen.getByText('Gesteigert')).toBeInTheDocument()
   })
 
   it('startet eine befüllte Einheit erst nach Bestätigung und stellt Dialogfokus wieder her', async () => {
@@ -190,6 +391,7 @@ describe('GYM-Workflow', () => {
     render(<GymView data={data} onChange={onChange} draftStorageKey="finish-draft" />)
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    await fillEmptyReps(user)
     const finishTrigger = screen.getByRole('button', { name: 'Training beenden' })
     await user.click(finishTrigger)
     const dialog = screen.getByRole('dialog', { name: 'Training beenden' })
@@ -212,6 +414,7 @@ describe('GYM-Workflow', () => {
     render(<Harness initial={withPushExercise()} />)
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    await fillEmptyReps(user)
     const finish = screen.getByRole('button', { name: 'Training beenden' })
     await user.click(finish)
     const confirm = within(screen.getByRole('dialog', { name: 'Training beenden' })).getByRole('button', { name: 'Training beenden' })
@@ -232,6 +435,7 @@ describe('GYM-Workflow', () => {
     render(<GymView data={withPushExercise()} onChange={onChange} draftStorageKey="failed-finish" />)
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    await fillEmptyReps(user)
     await user.click(screen.getByRole('button', { name: 'Training beenden' }))
     await user.click(within(screen.getByRole('dialog', { name: 'Training beenden' })).getByRole('button', { name: 'Training beenden' }))
     expect(onChange).toHaveBeenCalledOnce()
@@ -247,8 +451,10 @@ describe('GYM-Workflow', () => {
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: 'Training starten' }))
     const weight = screen.getByRole('textbox', { name: 'Bankdrücken Satz 1 Gewicht' })
+    const reps = screen.getByRole('spinbutton', { name: 'Bankdrücken Satz 1 Wiederholungen' })
     await user.clear(weight)
     await user.type(weight, '72.5')
+    await user.type(reps, '0')
     first.unmount()
     const addedAfterStart = session('added-after-start', '2026-08-20')
     addedAfterStart.exercises[0] = { ...addedAfterStart.exercises[0]!, weightKg: 99, performedSets: [
@@ -259,6 +465,7 @@ describe('GYM-Workflow', () => {
     data.gymSessions = [addedAfterStart]
     render(<Harness initial={data} />)
     expect(screen.getByRole('textbox', { name: 'Bankdrücken Satz 1 Gewicht' })).toHaveValue('72,5')
+    expect(screen.getByRole('spinbutton', { name: 'Bankdrücken Satz 1 Wiederholungen' })).toHaveValue(0)
   })
 
   it('zeigt exakt die Template-Sätze, vergleicht stabil per Übungs-ID und speichert jeden Satz einzeln', async () => {
@@ -272,6 +479,7 @@ describe('GYM-Workflow', () => {
     await user.click(screen.getByRole('button', { name: 'Training starten' }))
     expect(screen.getAllByText(/Letztes Mal:/)).toHaveLength(3)
     expect(screen.getAllByText(/72,5 kg × 8/)).toHaveLength(3)
+    await fillEmptyReps(user)
     const weight = screen.getByRole('textbox', { name: 'Bankdrücken Satz 2 Gewicht' })
     await user.clear(weight)
     await user.type(weight, '75,5')
@@ -519,6 +727,7 @@ describe('GYM-Workflow', () => {
     render(<GymView data={withPushExercise()} onChange={onChange} draftStorageKey="weight-range-draft" />)
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    await fillEmptyReps(user)
     const weight = screen.getByRole('textbox', { name: 'Bankdrücken Satz 1 Gewicht' })
     const finish = screen.getByRole('button', { name: 'Training beenden' })
 
@@ -617,6 +826,7 @@ describe('GYM-Workflow', () => {
     render(<Harness initial={data} />)
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    await fillEmptyReps(user)
     const fly = screen.getByRole('button', { name: /Butterfly.*2 Sätze/ })
     await user.click(fly)
     const invalidWeight = screen.getByRole('textbox', { name: 'Butterfly Satz 1 Gewicht' })
@@ -636,44 +846,36 @@ describe('GYM-Workflow', () => {
     expect(screen.queryByRole('dialog', { name: 'Training beenden' })).not.toBeInTheDocument()
   })
 
-  it('erklärt ungültige Wiederholungen, öffnet sie beim Abschluss und erlaubt Recovery', async () => {
+  it('startet mit leeren Wiederholungen und validiert sie erst beim Erledigen der Übung, wobei null gültig ist', async () => {
     const user = userEvent.setup()
     const data = withPushExercise()
-    data.gymTemplates[0]!.exercises.push({ id: 'fly', name: 'Butterfly', sets: 2, targetWeightKg: 35, targetReps: 12, position: 1 })
-    render(<Harness initial={data} />)
+    const first = render(<Harness initial={data} />)
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: 'Training starten' }))
-    const fly = screen.getByRole('button', { name: /Butterfly.*2 Sätze/ })
-    await user.click(fly)
-    const reps = screen.getByRole('spinbutton', { name: 'Butterfly Satz 1 Wiederholungen' })
-    const row = reps.closest('.gym-set-row')!
+    let reps = screen.getAllByRole('spinbutton', { name: /Bankdrücken Satz \d Wiederholungen/ })
+    expect(reps.map((input) => (input as HTMLInputElement).value)).toEqual(['', '', ''])
+    expect(reps.every((input) => input.getAttribute('aria-invalid') === 'false')).toBe(true)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
 
-    for (const invalid of ['', '0', '101']) {
-      await user.clear(reps)
-      if (invalid) await user.type(reps, invalid)
-      expect(reps).toHaveAttribute('aria-invalid', 'true')
-      const errorId = reps.getAttribute('aria-describedby')
-      expect(errorId).toBeTruthy()
-      expect(document.getElementById(errorId!)).toHaveTextContent('Wiederholungen müssen zwischen 1 und 100 liegen.')
-      expect(within(row as HTMLElement).getByRole('alert')).toHaveTextContent('zwischen 1 und 100')
-      expect(within(row as HTMLElement).queryByText('Noch kein Vergleich')).not.toBeInTheDocument()
-      expect(screen.getByRole('button', { name: 'Training beenden' })).toHaveAttribute('aria-disabled', 'true')
-    }
+    first.unmount()
+    render(<Harness initial={data} />)
+    reps = screen.getAllByRole('spinbutton', { name: /Bankdrücken Satz \d Wiederholungen/ })
+    expect(reps.map((input) => (input as HTMLInputElement).value)).toEqual(['', '', ''])
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
 
-    await user.click(fly)
-    await user.click(screen.getByRole('button', { name: 'Training beenden' }))
+    const completed = screen.getByRole('checkbox', { name: 'Bankdrücken als erledigt markieren' })
+    await user.click(completed)
     await waitFor(() => {
-      expect(fly).toHaveAttribute('aria-expanded', 'true')
-      expect(reps).toHaveFocus()
+      expect(reps[0]).toHaveFocus()
     })
-    expect(screen.queryByRole('dialog', { name: 'Training beenden' })).not.toBeInTheDocument()
+    expect(completed).not.toBeChecked()
+    expect(screen.getAllByRole('alert')).toHaveLength(3)
+    expect(screen.getAllByRole('alert')[0]).toHaveTextContent('zwischen 0 und 100')
 
-    await user.clear(reps)
-    await user.type(reps, '12')
-    expect(reps).toHaveAttribute('aria-invalid', 'false')
-    expect(reps).not.toHaveAttribute('aria-describedby')
-    expect(within(row as HTMLElement).queryByRole('alert')).not.toBeInTheDocument()
-    expect(within(row as HTMLElement).getByText('Noch kein Vergleich')).toBeInTheDocument()
+    await fillEmptyReps(user, '0')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    await user.click(completed)
+    expect(completed).toBeChecked()
     expect(screen.getByRole('button', { name: 'Training beenden' })).toHaveAttribute('aria-disabled', 'false')
   })
 
@@ -707,7 +909,7 @@ describe('GYM-Workflow', () => {
     const weightErrorId = weight.getAttribute('aria-describedby')
     const repsErrorId = reps.getAttribute('aria-describedby')
     expect(document.getElementById(weightErrorId!)).toHaveTextContent('Gewicht muss zwischen 0 und 1.000 kg liegen.')
-    expect(document.getElementById(repsErrorId!)).toHaveTextContent('Wiederholungen müssen zwischen 1 und 100 liegen.')
+    expect(document.getElementById(repsErrorId!)).toHaveTextContent('Wiederholungen müssen zwischen 0 und 100 liegen.')
     expect(within(row).getAllByRole('alert')).toHaveLength(2)
     expect(within(row).queryByText('Noch kein Vergleich')).not.toBeInTheDocument()
 
@@ -744,7 +946,8 @@ describe('GYM-Workflow', () => {
     await user.click(screen.getByRole('button', { name: 'Training starten' }))
 
     expect(screen.getByRole('button', { name: /Bankdrücken.*8–12 Wdh/ })).toBeInTheDocument()
-    expect(screen.getByRole('spinbutton', { name: 'Bankdrücken Satz 1 Wiederholungen' })).toHaveValue(8)
+    expect(screen.getByRole('spinbutton', { name: 'Bankdrücken Satz 1 Wiederholungen' })).toHaveValue(null)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it('erklärt ungültige Wiederholungsbereiche im Vorlageneditor', async () => {
@@ -767,6 +970,7 @@ describe('GYM-Workflow', () => {
     const first = render(<GymView data={data} onChange={onChange} draftStorageKey="progress-draft" />)
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    await fillEmptyReps(user)
     await user.click(screen.getByRole('checkbox', { name: 'Bankdrücken als erledigt markieren' }))
     await user.click(screen.getByRole('checkbox', { name: 'Bankdrücken: nächstes Mal Gewicht steigern' }))
     expect(document.querySelector('[data-exercise-id]')).toHaveClass('completed')
@@ -792,6 +996,7 @@ describe('GYM-Workflow', () => {
 
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: 'Training starten' }))
+    await fillEmptyReps(user)
     expect(screen.getByRole('status')).toHaveTextContent('Gewicht steigern')
     expect(screen.getByRole('checkbox', { name: 'Bankdrücken: nächstes Mal Gewicht steigern' })).not.toBeChecked()
     await user.click(screen.getByRole('button', { name: 'Training beenden' }))

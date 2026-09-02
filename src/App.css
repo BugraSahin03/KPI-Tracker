@@ -861,6 +861,14 @@ main {
   background: var(--surface-3);
 }
 
+.heatmap-cells button.today {
+  z-index: 1;
+  border-color: rgba(244, 245, 241, 0.98);
+  box-shadow:
+    0 0 0 1px rgba(244, 245, 241, 0.9),
+    0 0 7px rgba(244, 245, 241, 0.28);
+}
+
 .legend {
   min-width: 510px;
   margin-top: 13px;
@@ -1884,6 +1892,65 @@ fieldset legend {
 
 .gym-manage-list,
 .gym-history-list { display: grid; gap: 10px; }
+.gym-history-list { gap: 22px; }
+.gym-history-year { display: grid; gap: 14px; }
+.gym-history-year > h2 { margin: 0; padding-bottom: 8px; border-bottom: 1px solid rgba(198, 255, 61, .18); color: var(--lime); font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+.gym-history-month { min-width: 0; display: grid; gap: 11px; }
+.gym-history-month.is-expanded {
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid rgba(198, 255, 61, .13);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(198, 255, 61, .035), rgba(198, 255, 61, .012) 34%, rgba(198, 255, 61, .006));
+}
+.gym-history-month-toggle {
+  appearance: none;
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  padding: 9px 11px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 20px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid rgba(198, 255, 61, .2);
+  border-radius: 12px;
+  color: var(--text);
+  background: rgba(198, 255, 61, .075);
+  text-align: left;
+  cursor: pointer;
+}
+.gym-history-month-toggle:hover { background: rgba(198, 255, 61, .11); }
+.gym-history-month-toggle:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
+.gym-history-month.is-expanded .gym-history-month-toggle {
+  border: 0;
+  border-bottom: 1px solid rgba(198, 255, 61, .12);
+  border-radius: 0;
+}
+.gym-history-month.is-expanded .gym-history-month-toggle:focus-visible { outline-offset: -3px; }
+.gym-history-month-heading { min-width: 0; margin: 0; }
+.gym-history-month-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #e6f9bd; font-size: .82rem; font-weight: 800; text-transform: capitalize; }
+.gym-history-month-count { color: #a9b891; font-size: .58rem; font-weight: 650; white-space: nowrap; }
+.gym-history-month-toggle svg { width: 17px; height: 17px; color: var(--lime); }
+.gym-history-month-content { min-width: 0; display: grid; gap: 11px; }
+.gym-history-month.is-expanded .gym-history-month-content {
+  position: relative;
+  padding: 13px 11px 12px;
+}
+.gym-history-month.is-expanded .gym-history-month-content::before {
+  content: '';
+  position: absolute;
+  inset: 13px auto 12px 4px;
+  width: 1px;
+  border-radius: 999px;
+  background: rgba(198, 255, 61, .12);
+}
+.gym-history-month-content[hidden] { display: none; }
+.gym-history-week { display: grid; gap: 7px; }
+.gym-history-week-head { min-height: 24px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.gym-history-week-head h4 { margin: 0; color: #aeb8bd; font-size: .62rem; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+.gym-history-week-head span { color: var(--muted); font-size: .56rem; }
+.gym-history-week-list { display: grid; gap: 8px; }
 .gym-library-open { margin-bottom: 12px; }
 .gym-library-open svg { width: 16px; }
 .gym-library-list { display: grid; gap: 9px; }
@@ -1941,6 +2008,11 @@ fieldset legend {
 .gym-history-exercise { padding-top: 11px; display: grid; gap: 3px; }
 .gym-history-exercise strong { font-size: .74rem; }
 .gym-history-exercise span { color: var(--muted); font-size: .64rem; }
+.gym-history-exercise-title { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.gym-history-exercise-title > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gym-history-exercise-title .gym-history-increase { flex: 0 0 auto; padding: 3px 6px; display: inline-flex; align-items: center; gap: 4px; border-radius: 999px; color: #d8f79b; background: rgba(198, 255, 61, .065); font-size: .52rem; font-weight: 750; }
+.gym-history-exercise-title .gym-history-increase > span { color: inherit; }
+.gym-history-increase svg { width: 12px; height: 12px; color: var(--lime); }
 .gym-history-details .link-button { appearance: none; min-height: 40px; margin-top: 3px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; background: transparent; cursor: pointer; }
 .gym-history-details .link-button svg { width: 15px; }
 

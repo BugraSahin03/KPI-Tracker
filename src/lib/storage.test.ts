@@ -144,6 +144,12 @@ describe('Storage-Layer', () => {
       { id: 'session-bench', templateExerciseId: 'bench', name: 'Bankdrücken', sets: 3, reps: 9, targetReps: 8, targetRepsMax: 12, increaseNextTime: true, completed: true, position: 0 },
     ] }
     expect(isGymSession(session)).toBe(true)
+    expect(isGymSession({ ...session, exercises: [{ ...session.exercises[0], reps: 0, performedSets: [
+      { id: 'set-1', setNumber: 1, reps: 0 },
+      { id: 'set-2', setNumber: 2, reps: 0 },
+      { id: 'set-3', setNumber: 3, reps: 0 },
+    ] }] })).toBe(true)
+    expect(isGymSession({ ...session, exercises: [{ ...session.exercises[0], reps: -1 }] })).toBe(false)
     expect(isGymSession({ ...session, exercises: [{ ...session.exercises[0], increaseNextTime: 'ja' }] })).toBe(false)
     const legacyExercise = { id: 'legacy-bench', templateExerciseId: 'bench', name: 'Bankdrücken', sets: 3, reps: 9, position: 0 }
     expect(isGymSession({ ...session, exercises: [legacyExercise] })).toBe(true)

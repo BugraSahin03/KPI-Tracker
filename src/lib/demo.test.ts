@@ -44,6 +44,22 @@ describe('Demo-Daten', () => {
     expect(statuses.filter((status) => status === 'open').length).toBeGreaterThan(5)
   })
 
+  it('erzeugt realistische, deterministische Plateaus und Gewichtssteigerungen im GYM-Verlauf', () => {
+    const sessions = createDemoData(anchor).gymSessions
+    const bench = sessions
+      .flatMap((session) => session.exercises.map((exercise) => ({ session, exercise })))
+      .filter(({ exercise }) => exercise.name === 'Bankdrücken')
+      .sort((a, b) => a.session.date.localeCompare(b.session.date))
+    const weights = bench.map(({ exercise }) => exercise.performedSets?.[0]?.weightKg)
+
+    expect(weights.length).toBeGreaterThan(4)
+    expect(weights.every((weight) => weight !== undefined)).toBe(true)
+    expect(weights.every((weight, index) => index === 0 || weight! >= weights[index - 1]!)).toBe(true)
+    expect(weights.some((weight, index) => index > 0 && weight === weights[index - 1])).toBe(true)
+    expect(weights.some((weight, index) => index > 0 && weight! > weights[index - 1]!)).toBe(true)
+    expect(createDemoData(anchor).gymSessions).toEqual(sessions)
+  })
+
   it('nimmt auch offene Demotage in realistische Statistik-Nenner auf', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date(2025, 5, 15, 12))

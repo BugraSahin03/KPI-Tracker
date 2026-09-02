@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createInitialData, setEntryStatus, toggleGoalActive } from './storage'
-import { calculateStats, dayGoalProgress, dayStatus, goalIsScheduledOn, sortBodyMetricsNewestFirst } from './stats'
+import { calculateStats, dayGoalProgress, dayProgressPresentation, dayStatus, goalIsScheduledOn, sortBodyMetricsNewestFirst } from './stats'
 
 describe('Statistik', () => {
   afterEach(() => {
@@ -61,6 +61,59 @@ describe('Statistik', () => {
   it('liefert für Tage ohne aktive oder historische Ziele einen neutralen Fortschritt', () => {
     const data = createInitialData('2024-02-02')
     expect(dayGoalProgress(data, '2024-02-01')).toEqual({ done: 0, total: 0, ratio: 0 })
+  })
+
+  it('stellt nur einen vollständig unbewerteten heutigen Tag neutral dar', () => {
+    const today = '2026-08-27'
+    const data = createInitialData('2026-08-01')
+
+    expect(dayProgressPresentation(data, today, today)).toEqual({
+      done: 0,
+      total: 2,
+      ratio: 0,
+      tone: 'open',
+      untouchedToday: true,
+    })
+
+    data.entries = setEntryStatus(data.entries, 'protein', today, 'done')
+    expect(dayProgressPresentation(data, today, today)).toMatchObject({
+      done: 1,
+      total: 2,
+      ratio: 0.5,
+      tone: 'partial',
+      untouchedToday: false,
+    })
+
+    data.entries = setEntryStatus(data.entries, 'protein', today, 'failed')
+    expect(dayProgressPresentation(data, today, today)).toMatchObject({
+      done: 0,
+      total: 2,
+      tone: 'failed',
+      untouchedToday: false,
+    })
+  })
+
+  it('lässt nur Zukunft und Tage ohne aktive Ziele neutral, nicht vergangene offene Tage', () => {
+    const data = createInitialData('2026-08-01')
+    data.goals[0] = toggleGoalActive(data.goals[0], '2026-08-10')
+    data.goals[1] = toggleGoalActive(data.goals[1], '2026-08-10')
+
+    expect(dayProgressPresentation(data, '2026-08-09', '2026-08-27')).toMatchObject({
+      total: 2,
+      tone: 'failed',
+      untouchedToday: false,
+    })
+    expect(dayProgressPresentation(data, '2026-08-27', '2026-08-27')).toMatchObject({
+      total: 0,
+      tone: 'open',
+      untouchedToday: false,
+    })
+    const activeData = createInitialData('2026-08-01')
+    expect(dayProgressPresentation(activeData, '2026-08-28', '2026-08-27')).toMatchObject({
+      total: 2,
+      tone: 'open',
+      untouchedToday: false,
+    })
   })
 
   it('zählt bei einer Neuinstallation keine Tage vor der ersten Nutzung', () => {

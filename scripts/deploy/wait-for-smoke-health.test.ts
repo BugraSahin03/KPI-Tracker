@@ -7,7 +7,7 @@ describe('Production-Smoke-Startup', () => {
     const child = { exitCode: null as number | null, signalCode: null as NodeJS.Signals | null }
     const fetchImpl = vi.fn(async () => {
       child.exitCode = 1
-      return new Response(JSON.stringify({ status: 'ok', sqliteReady: true, schemaVersion: 9 }), {
+      return new Response(JSON.stringify({ status: 'ok', sqliteReady: true, schemaVersion: 10 }), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       })
     })
@@ -33,7 +33,7 @@ describe('Production-Smoke-Startup', () => {
     const child = { exitCode: null as number | null, signalCode: null as NodeJS.Signals | null }
     const fetchImpl = vi.fn(async () => {
       child.signalCode = 'SIGTERM'
-      return new Response(JSON.stringify({ status: 'ok', sqliteReady: true, schemaVersion: 9 }), {
+      return new Response(JSON.stringify({ status: 'ok', sqliteReady: true, schemaVersion: 10 }), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       })
     })

@@ -24,6 +24,13 @@ export interface DayGoalProgress {
   ratio: number
 }
 
+export type DayProgressTone = 'open' | 'done' | 'failed' | 'partial'
+
+export interface DayProgressPresentation extends DayGoalProgress {
+  tone: DayProgressTone
+  untouchedToday: boolean
+}
+
 export function sortBodyMetricsNewestFirst(metrics: BodyMetric[]) {
   return [...metrics].sort((a, b) =>
     b.date.localeCompare(a.date) ||
@@ -60,6 +67,35 @@ export function dayGoalProgress(data: AppData, date: string): DayGoalProgress {
     total: goals.length,
     ratio: goals.length === 0 ? 0 : done / goals.length,
   }
+}
+
+/**
+ * Derives only the calendar tile presentation. Statistics intentionally keep
+ * counting the current day as before; an untouched current day is merely shown
+ * neutrally until the first explicit check-in is made.
+ */
+export function dayProgressPresentation(
+  data: AppData,
+  date: string,
+  currentDate = toDateKey(new Date()),
+): DayProgressPresentation {
+  const progress = dayGoalProgress(data, date)
+  const eligibleGoalIds = new Set(goalsForDate(data, date).map((goal) => goal.id))
+  const hasRecordedStatus = data.entries.some(
+    (entry) => entry.date === date && eligibleGoalIds.has(entry.goalId),
+  )
+  const untouchedToday = date === currentDate && progress.total > 0 && !hasRecordedStatus
+
+  let tone: DayProgressTone = 'open'
+  if (date <= currentDate && progress.total > 0 && !untouchedToday) {
+    tone = progress.done === progress.total
+      ? 'done'
+      : progress.done === 0
+        ? 'failed'
+        : 'partial'
+  }
+
+  return { ...progress, tone, untouchedToday }
 }
 
 export function dayStatus(data: AppData, date: string): GoalStatus {
