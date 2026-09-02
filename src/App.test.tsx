@@ -1,12 +1,19 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { addDays, addMonths, addWeeks, addYears, startOfISOWeek } from 'date-fns'
+import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { formatDayTitle, formatShortDate, periodLabel, toDateKey } from './lib/date'
 import { calculateStats } from './lib/stats'
 import { createInitialData, setEntryStatus, STORAGE_KEY } from './lib/storage'
 import { PENDING_MUTATIONS_STORAGE_KEY } from './lib/pendingMutations'
+
+function fillGymReps(value = '8') {
+  for (const input of document.querySelectorAll<HTMLInputElement>('input[type="number"][aria-label*=" Satz "][aria-label$=" Wiederholungen"]')) {
+    if (input.value === '') fireEvent.change(input, { target: { value } })
+  }
+}
 
 describe('Heute-Interaktion', () => {
   beforeEach(() => {
@@ -110,7 +117,7 @@ describe('Heute-Interaktion', () => {
     expect(screen.getAllByRole('button', { name: 'Jahr' })).toHaveLength(1)
     expect(document.querySelectorAll('.date-stepper')).toHaveLength(1)
 
-    const day = screen.getAllByRole('button', { name: /August 2026: 0 von 2 Zielen erfüllt/ }).find((button) => !button.hasAttribute('disabled'))!
+    const day = screen.getByRole('button', { name: /: heute, noch keine Bewertung$/ })
     await user.click(day)
     expect(screen.getAllByRole('button', { name: 'Heute' }).at(-1)).toHaveAttribute('aria-current', 'page')
   })
@@ -220,6 +227,96 @@ describe('Heute-Interaktion', () => {
     neutralDays.forEach((tile) => expect(tile).toHaveClass('open'))
   })
 
+  it('zeigt einen unbewerteten heutigen Tag in Woche, Monat und Jahr neutral', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 7, 27, 14, 30))
+    const serverData = createInitialData('2026-08-01')
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ data: serverData, revision: 0 }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )))
+
+    render(<StrictMode><App /></StrictMode>)
+    await vi.waitFor(() => expect(screen.getAllByRole('button', { name: 'Analyse' }).length).toBeGreaterThan(0))
+    fireEvent.click(screen.getAllByRole('button', { name: 'Analyse' }).at(-1)!)
+    expect(vi.getTimerCount()).toBe(1)
+
+    const monthToday = screen.getByRole('button', {
+      name: '27. August 2026: heute, noch keine Bewertung',
+    })
+    expect(monthToday).toHaveClass('open', 'today')
+    expect(monthToday).not.toHaveClass('failed')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Woche' }))
+    const currentWeek = screen.getByRole('group', { name: periodLabel('week', new Date()) })
+    const weekToday = within(currentWeek).getByRole('button', {
+      name: '27. August 2026: heute, noch keine Bewertung',
+    })
+    expect(weekToday).toHaveClass('open', 'today')
+    expect(weekToday).not.toHaveClass('failed')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Jahr' }))
+    const yearToday = screen.getByRole('button', {
+      name: '27.08.26: heute, noch keine Bewertung',
+    })
+    expect(yearToday).toHaveClass('open', 'today')
+    expect(yearToday).not.toHaveClass('failed')
+    expect(yearToday).toBeEmptyDOMElement()
+  })
+
+  it('aktualisiert die Kalenderkacheln um Mitternacht und nach Rückkehr in die App', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 7, 27, 23, 59, 30))
+    const serverData = createInitialData('2026-08-01')
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ data: serverData, revision: 0 }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )))
+
+    render(<App />)
+    await vi.waitFor(() => expect(screen.getAllByRole('button', { name: 'Analyse' }).length).toBeGreaterThan(0))
+    fireEvent.click(screen.getAllByRole('button', { name: 'Analyse' }).at(-1)!)
+
+    expect(screen.getByRole('button', {
+      name: '27. August 2026: heute, noch keine Bewertung',
+    })).toHaveClass('open', 'today')
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000)
+    })
+
+    expect(screen.getByRole('button', {
+      name: '27. August 2026: 0 von 2 Zielen erfüllt',
+    })).toHaveClass('failed')
+    expect(screen.getByRole('button', {
+      name: '27. August 2026: 0 von 2 Zielen erfüllt',
+    })).not.toHaveClass('today')
+    expect(screen.getByRole('button', {
+      name: '28. August 2026: heute, noch keine Bewertung',
+    })).toHaveClass('open', 'today')
+
+    vi.setSystemTime(new Date(2026, 7, 29, 12))
+    fireEvent(window, new Event('pageshow'))
+    expect(screen.getByRole('button', {
+      name: '28. August 2026: 0 von 2 Zielen erfüllt',
+    })).toHaveClass('failed')
+    expect(screen.getByRole('button', {
+      name: '29. August 2026: heute, noch keine Bewertung',
+    })).toHaveClass('open', 'today')
+
+    vi.setSystemTime(new Date(2026, 7, 30, 12))
+    fireEvent(document, new Event('visibilitychange'))
+    expect(screen.getByRole('button', {
+      name: '29. August 2026: 0 von 2 Zielen erfüllt',
+    })).toHaveClass('failed')
+    expect(screen.getByRole('button', {
+      name: '30. August 2026: heute, noch keine Bewertung',
+    })).toHaveClass('open', 'today')
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Heute' }).at(-1)!)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('behält einen aktiven Trainingsdraft über Tabwechsel hinweg', async () => {
     const user = userEvent.setup()
     const serverData = createInitialData('2026-08-03')
@@ -316,6 +413,7 @@ describe('Heute-Interaktion', () => {
     await user.click((await screen.findAllByRole('button', { name: 'GYM' })).at(-1)!)
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: /Training starten/ }))
+    fillGymReps()
     await user.click(screen.getByRole('button', { name: 'Training beenden' }))
     await user.click(within(screen.getByRole('dialog', { name: 'Training beenden' })).getByRole('button', { name: 'Training beenden' }))
 
@@ -351,6 +449,7 @@ describe('Heute-Interaktion', () => {
     await user.click((await screen.findAllByRole('button', { name: 'GYM' })).at(-1)!)
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: /Training starten/ }))
+    fillGymReps()
     await user.click(screen.getByRole('button', { name: 'Training beenden' }))
     await user.click(within(screen.getByRole('dialog', { name: 'Training beenden' })).getByRole('button', { name: 'Training beenden' }))
 

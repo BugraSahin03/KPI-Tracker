@@ -84,6 +84,27 @@ describe('PaceDatabase', () => {
     expect(database.getData().gymSessions).toHaveLength(0)
   })
 
+  it('speichert null Wiederholungen als gültigen ausgeführten Satz', () => {
+    database = new PaceDatabase(':memory:')
+    const template = database.getData().gymTemplates[0]!
+    database.applyMutation({ id: 'zero-template', kind: 'gym.template.upsert', template: {
+      ...template, exercises: [{ id: 'bench-zero', name: 'Bankdrücken', sets: 2, targetReps: 8, position: 0 }],
+    } })
+    database.applyMutation({ id: 'zero-session', kind: 'gym.session.complete', session: {
+      id: 'zero-session', templateId: template.id, templateName: template.name, date: '2026-08-03',
+      startedAt: '2026-08-03T17:00:00Z', completedAt: '2026-08-03T18:00:00Z', exercises: [{
+        id: 'zero-session-bench', templateExerciseId: 'bench-zero', name: 'Bankdrücken', sets: 2, reps: 0, position: 0,
+        performedSets: [
+          { id: 'zero-set-1', setNumber: 1, reps: 0 },
+          { id: 'zero-set-2', setNumber: 2, reps: 8 },
+        ],
+      }],
+    } })
+    expect(database.getData().gymSessions[0]?.exercises[0]).toMatchObject({
+      reps: 0, performedSets: [{ setNumber: 1, reps: 0 }, { setNumber: 2, reps: 8 }],
+    })
+  })
+
   it('migriert Schema-5-Aggregate verlustfrei in einzelne Satzzeilen', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-schema5-'))
     const filename = path.join(root, 'pace.sqlite')
@@ -100,7 +121,7 @@ describe('PaceDatabase', () => {
         .run('profile-bugra', longExerciseId, 'legacy-session', longExerciseId, 'Deadlift', 3, 100, 20, 0)
       database.close()
       database = new PaceDatabase(filename)
-      expect(database.health()).toEqual({ sqliteReady: true, schemaVersion: 9 })
+      expect(database.health()).toEqual({ sqliteReady: true, schemaVersion: 10 })
       const migratedSets = database.getData().gymSessions[0]?.exercises[0]?.performedSets
       expect(migratedSets).toEqual([
         expect.objectContaining({ setNumber: 1, weightKg: 100, reps: 20 }),
@@ -139,7 +160,7 @@ describe('PaceDatabase', () => {
       legacy.close()
 
       database = new PaceDatabase(filename)
-      expect(database.health()).toEqual({ sqliteReady: true, schemaVersion: 9 })
+      expect(database.health()).toEqual({ sqliteReady: true, schemaVersion: 10 })
       expect(database.getData().gymTemplates[0]?.exercises[0]).toEqual(expect.objectContaining({ targetReps: 8 }))
       expect(database.getData().gymTemplates[0]?.exercises[0]).not.toHaveProperty('targetRepsMax')
       expect(database.getData().gymSessions[0]?.exercises[0]).not.toHaveProperty('increaseNextTime')
@@ -231,7 +252,7 @@ describe('PaceDatabase', () => {
           CREATE INDEX gym_exercise_aliases_target_idx ON gym_exercise_aliases(profile_id,target_id);`)
         legacy.close()
         database = new PaceDatabase(filename)
-        expect(database.health()).toEqual({ sqliteReady: true, schemaVersion: 9 })
+        expect(database.health()).toEqual({ sqliteReady: true, schemaVersion: 10 })
         expect(database.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='gym_exercise_aliases'").get()).toBeTruthy()
         database.close()
         database = undefined
@@ -435,8 +456,8 @@ describe('PaceDatabase', () => {
 
   it('meldet bei einer unerwarteten Schemaversion nicht ready', () => {
     database = new PaceDatabase(':memory:')
-    database.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(10, new Date().toISOString())
-    expect(database.health()).toEqual({ sqliteReady: false, schemaVersion: 10 })
+    database.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(11, new Date().toISOString())
+    expect(database.health()).toEqual({ sqliteReady: false, schemaVersion: 11 })
   })
 
   it('verwaltet OAuth-States parallel und verbraucht jeden nur einmal', () => {

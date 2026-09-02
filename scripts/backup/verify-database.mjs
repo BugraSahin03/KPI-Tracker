@@ -3,7 +3,7 @@ import Database from 'better-sqlite3'
 import fs from 'node:fs'
 import path from 'node:path'
 
-const EXPECTED_SCHEMA_VERSION = 9
+const EXPECTED_SCHEMA_VERSION = 10
 const REQUIRED_TABLES = ['app_state', 'body_metrics', 'daily_entries', 'goals', 'gym_exercise_aliases', 'gym_exercises', 'gym_session_sets', 'gym_sessions', 'gym_templates', 'profiles', 'schema_migrations']
 
 function inspectExact(databasePath) {
@@ -73,5 +73,5 @@ if (!fs.existsSync(databasePath) || !fs.statSync(databasePath).isFile()) throw n
 if (allowMigration) await verifyMigrationOnCopy(databasePath)
 else {
   inspectExact(databasePath)
-  console.log('SQLite Schema 9, Profile, quick_check und foreign_key_check: ok')
+  console.log('SQLite Schema 10, Profile, quick_check und foreign_key_check: ok')
 }

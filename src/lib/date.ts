@@ -29,6 +29,20 @@ export function formatShortDate(key: string) {
   return format(fromDateKey(key), 'dd.MM.yy')
 }
 
+export function historyDateGroup(key: string) {
+  const date = fromDateKey(key)
+  const calendarYear = format(date, 'yyyy')
+  const isoWeek = getISOWeek(date)
+  const isoYear = getISOWeekYear(date)
+  return {
+    calendarYear,
+    monthKey: format(date, 'yyyy-MM'),
+    monthLabel: format(date, 'MMMM', { locale: de }),
+    isoWeekKey: `${isoYear}-W${String(isoWeek).padStart(2, '0')}`,
+    isoWeekLabel: `KW ${isoWeek}${String(isoYear) === calendarYear ? '' : ` · ${isoYear}`}`,
+  }
+}
+
 export function dateRange(start: Date, end: Date) {
   const result: string[] = []
   let current = start

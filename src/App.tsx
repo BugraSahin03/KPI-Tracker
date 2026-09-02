@@ -36,13 +36,12 @@ import {
   endOfMonth,
   format,
   getISODay,
-  isAfter,
   isSameISOWeek,
   isSameMonth,
   startOfMonth,
 } from 'date-fns'
 import { de } from 'date-fns/locale'
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react'
 import { createPortal } from 'react-dom'
 import './App.css'
 import {
@@ -55,7 +54,7 @@ import {
   toDateKey,
   todayKey,
 } from './lib/date'
-import { calculateStats, dayGoalProgress, goalsForDate, sortBodyMetricsNewestFirst, statusFor } from './lib/stats'
+import { calculateStats, dayProgressPresentation, goalsForDate, sortBodyMetricsNewestFirst, statusFor } from './lib/stats'
 import { parseDecimalInput } from './lib/decimal'
 import { loadData, makeId, setEntryStatus, STORAGE_KEY, toggleGoalActive } from './lib/storage'
 import { DEFAULT_PROFILE_ID, type AppData, type BodyMetric, type DataMutation, type Goal, type GoalIcon, type GoalStatus, type Period, type Profile, type ProfileId } from './types'
@@ -79,6 +78,41 @@ const BUILTIN_PROFILES: Profile[] = [
   { id: 'profile-bugra', name: 'Bugra', initial: 'B', color: '#c6ff3d' },
   { id: 'profile-sena', name: 'Sena', initial: 'S', color: '#a78bfa' },
 ]
+
+function useLocalTodayKey() {
+  const [currentToday, setCurrentToday] = useState(todayKey)
+
+  useEffect(() => {
+    let timeoutId: number | undefined
+    let disposed = false
+
+    const resyncAndSchedule = () => {
+      if (disposed) return
+      setCurrentToday(todayKey())
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId)
+
+      const now = new Date()
+      const nextLocalMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+      timeoutId = window.setTimeout(
+        resyncAndSchedule,
+        Math.max(1, nextLocalMidnight.getTime() - now.getTime()),
+      )
+    }
+
+    resyncAndSchedule()
+    document.addEventListener('visibilitychange', resyncAndSchedule)
+    window.addEventListener('pageshow', resyncAndSchedule)
+
+    return () => {
+      disposed = true
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId)
+      document.removeEventListener('visibilitychange', resyncAndSchedule)
+      window.removeEventListener('pageshow', resyncAndSchedule)
+    }
+  }, [])
+
+  return currentToday
+}
 
 function emptyData(): AppData {
   return { version: 3, goals: [], entries: [], bodyMetrics: [], gymTemplates: [], gymSessions: [], gymExercises: [] }
@@ -400,30 +434,27 @@ function TodayView({
 function DayTile({
   date,
   data,
+  currentToday,
   onSelect,
   muted = false,
   forceDisabled = false,
 }: {
   date: Date
   data: AppData
+  currentToday: string
   onSelect: (date: string) => void
   muted?: boolean
   forceDisabled?: boolean
 }) {
   const key = toDateKey(date)
-  const future = forceDisabled || isAfter(date, new Date())
-  const progress = dayGoalProgress(data, key)
-  const hasGoals = !future && progress.total > 0
-  const partial = hasGoals && progress.done > 0 && progress.done < progress.total
-  const progressClass = !hasGoals
-    ? 'open'
-    : progress.done === progress.total
-      ? 'done'
-      : progress.done === 0
-        ? 'failed'
-        : 'partial'
+  const future = forceDisabled || key > currentToday
+  const progress = dayProgressPresentation(data, key, currentToday)
+  const partial = !future && progress.tone === 'partial'
+  const progressClass = future ? 'open' : progress.tone
   const progressLabel = future
     ? 'noch nicht verfügbar'
+    : progress.untouchedToday
+      ? 'heute, noch keine Bewertung'
     : progress.total === 0
       ? 'keine aktiven Ziele'
       : `${progress.done} von ${progress.total} Zielen erfüllt`
@@ -433,7 +464,7 @@ function DayTile({
   return (
     <button
       type="button"
-      className={`day-tile ${progressClass} ${muted ? 'muted' : ''} ${key === todayKey() ? 'today' : ''}`}
+      className={`day-tile ${progressClass} ${muted ? 'muted' : ''} ${key === currentToday ? 'today' : ''}`}
       style={progressStyle}
       onClick={() => onSelect(key)}
       disabled={future}
@@ -450,16 +481,18 @@ function DayTile({
 function MonthCalendar({
   anchor,
   data,
+  currentToday,
   onSelect,
 }: {
   anchor: Date
   data: AppData
+  currentToday: string
   onSelect: (date: string) => void
 }) {
   const start = startOfMonth(anchor)
   const offset = getISODay(start) - 1
   const dates = dateRange(addDays(start, -offset), addDays(endOfMonth(anchor), 7 - getISODay(endOfMonth(anchor))))
-  const futurePeriod = start > new Date()
+  const futurePeriod = toDateKey(start) > currentToday
   return (
     <div className="calendar-panel">
       <div className="weekday-row" aria-hidden="true">
@@ -473,6 +506,7 @@ function MonthCalendar({
             key={key}
             date={fromDateKey(key)}
             data={data}
+            currentToday={currentToday}
             onSelect={onSelect}
             muted={!isSameMonth(fromDateKey(key), anchor)}
             forceDisabled={futurePeriod}
@@ -486,10 +520,12 @@ function MonthCalendar({
 function WeekCalendar({
   anchor,
   data,
+  currentToday,
   onSelect,
 }: {
   anchor: Date
   data: AppData
+  currentToday: string
   onSelect: (date: string) => void
 }) {
   const { start, end } = periodBounds('week', anchor)
@@ -502,7 +538,7 @@ function WeekCalendar({
       </div>
       <div className="week-grid" role="group" aria-label={periodLabel('week', anchor)}>
         {dateRange(start, end).map((key) => (
-          <DayTile key={key} date={fromDateKey(key)} data={data} onSelect={onSelect} />
+          <DayTile key={key} date={fromDateKey(key)} data={data} currentToday={currentToday} onSelect={onSelect} />
         ))}
       </div>
     </div>
@@ -512,10 +548,12 @@ function WeekCalendar({
 function YearCalendar({
   anchor,
   data,
+  currentToday,
   onSelect,
 }: {
   anchor: Date
   data: AppData
+  currentToday: string
   onSelect: (date: string) => void
 }) {
   const months = Array.from({ length: 12 }, (_, index) => new Date(anchor.getFullYear(), index, 1))
@@ -536,7 +574,7 @@ function YearCalendar({
             <strong>{format(month, 'MMM', { locale: de })}</strong>
             <div className="heatmap-cells">
               {keys.map((key) => (
-                <YearDayTile key={key} dateKey={key} data={data} onSelect={onSelect} />
+                <YearDayTile key={key} dateKey={key} data={data} currentToday={currentToday} onSelect={onSelect} />
               ))}
             </div>
           </div>
@@ -555,25 +593,21 @@ function YearCalendar({
 function YearDayTile({
   dateKey,
   data,
+  currentToday,
   onSelect,
 }: {
   dateKey: string
   data: AppData
+  currentToday: string
   onSelect: (date: string) => void
 }) {
-  const date = fromDateKey(dateKey)
-  const future = isAfter(date, new Date())
-  const progress = dayGoalProgress(data, dateKey)
-  const hasGoals = !future && progress.total > 0
-  const progressClass = !hasGoals
-    ? 'open'
-    : progress.done === progress.total
-      ? 'done'
-      : progress.done === 0
-        ? 'failed'
-        : 'partial'
+  const future = dateKey > currentToday
+  const progress = dayProgressPresentation(data, dateKey, currentToday)
+  const progressClass = future ? 'open' : progress.tone
   const progressLabel = future
     ? 'noch nicht verfügbar'
+    : progress.untouchedToday
+      ? 'heute, noch keine Bewertung'
     : progress.total === 0
       ? 'keine aktiven Ziele'
       : `${progress.done} von ${progress.total} Zielen erfüllt`
@@ -581,7 +615,7 @@ function YearDayTile({
   return (
     <button
       type="button"
-      className={progressClass}
+      className={`${progressClass} ${dateKey === currentToday ? 'today' : ''}`}
       style={progressClass === 'partial'
         ? ({ '--goal-progress': `${progress.ratio * 100}%` } as CSSProperties)
         : undefined}
@@ -597,6 +631,7 @@ function HistoryView({
   onSelectDay,
   period,
   anchor,
+  currentToday,
   onPeriodChange,
   onAnchorChange,
 }: {
@@ -604,9 +639,11 @@ function HistoryView({
   onSelectDay: (date: string) => void
   period: Period
   anchor: Date
+  currentToday: string
   onPeriodChange: (period: Period) => void
   onAnchorChange: (anchor: Date) => void
 }) {
+  const currentDate = fromDateKey(currentToday)
   const move = (direction: number) => {
     onAnchorChange(
       period === 'week'
@@ -629,22 +666,22 @@ function HistoryView({
         label={periodLabel(period, anchor)}
         onPrevious={() => move(-1)}
         onNext={() => move(1)}
-        onToday={() => onAnchorChange(new Date())}
+        onToday={() => onAnchorChange(currentDate)}
         isCurrent={
           period === 'year'
-            ? anchor.getFullYear() === new Date().getFullYear()
+            ? anchor.getFullYear() === currentDate.getFullYear()
             : period === 'week'
-              ? isSameISOWeek(anchor, new Date())
-              : isSameMonth(anchor, new Date())
+              ? isSameISOWeek(anchor, currentDate)
+              : isSameMonth(anchor, currentDate)
         }
-        nextDisabled={periodBounds(period, anchor).start > new Date()}
+        nextDisabled={periodBounds(period, anchor).start > currentDate}
       />
       {period === 'week' ? (
-        <WeekCalendar anchor={anchor} data={data} onSelect={select} />
+        <WeekCalendar anchor={anchor} data={data} currentToday={currentToday} onSelect={select} />
       ) : period === 'month' ? (
-        <MonthCalendar anchor={anchor} data={data} onSelect={select} />
+        <MonthCalendar anchor={anchor} data={data} currentToday={currentToday} onSelect={select} />
       ) : (
-        <YearCalendar anchor={anchor} data={data} onSelect={select} />
+        <YearCalendar anchor={anchor} data={data} currentToday={currentToday} onSelect={select} />
       )}
       <p className="history-hint">Tippe auf einen Tag, um ihn zu bearbeiten.</p>
     </section>
@@ -668,14 +705,15 @@ function Ring({ value }: { value: number }) {
   )
 }
 
-function InsightsView({ data, period, anchor }: { data: AppData; period: Period; anchor: Date }) {
-  const stats = useMemo(() => calculateStats(data, period, anchor), [data, period, anchor])
+function InsightsView({ data, period, anchor, currentToday }: { data: AppData; period: Period; anchor: Date; currentToday: string }) {
+  const currentDate = fromDateKey(currentToday)
+  const stats = calculateStats(data, period, anchor)
   const isCurrent =
     period === 'year'
-      ? anchor.getFullYear() === new Date().getFullYear()
+      ? anchor.getFullYear() === currentDate.getFullYear()
       : period === 'week'
-        ? isSameISOWeek(anchor, new Date())
-        : isSameMonth(anchor, new Date())
+        ? isSameISOWeek(anchor, currentDate)
+        : isSameMonth(anchor, currentDate)
   return (
     <section className="view">
       <PageIntro eyebrow="Was funktioniert" title="Insights" />
@@ -733,6 +771,7 @@ function InsightsView({ data, period, anchor }: { data: AppData; period: Period;
 function AnalysisView({ data, onSelectDay }: { data: AppData; onSelectDay: (date: string) => void }) {
   const [period, setPeriod] = useState<Period>('month')
   const [anchor, setAnchor] = useState(new Date())
+  const currentToday = useLocalTodayKey()
 
   return (
     <div className="analysis-combined" aria-label="Analyse">
@@ -741,10 +780,11 @@ function AnalysisView({ data, onSelectDay }: { data: AppData; onSelectDay: (date
         onSelectDay={onSelectDay}
         period={period}
         anchor={anchor}
+        currentToday={currentToday}
         onPeriodChange={setPeriod}
         onAnchorChange={setAnchor}
       />
-      <InsightsView data={data} period={period} anchor={anchor} />
+      <InsightsView data={data} period={period} anchor={anchor} currentToday={currentToday} />
     </div>
   )
 }

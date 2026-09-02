@@ -42,7 +42,7 @@ describe('Production-Installer-Vertrag', () => {
     expect(smokeWait).toContain('assertChildRunning()')
     expect(smokeWait).toContain('Healthcheck-Timeout:\\n${diagnostics()}')
     expect(smokeScript).not.toContain('attempt < 50')
-    expect(smokeScript).toContain("get().version !== 9")
+    expect(smokeScript).toContain("get().version !== 10")
   })
 
   it('paart DB-Backup und alten Symlink und hat einen Sidecar-sicheren Fehlerrollback', () => {
