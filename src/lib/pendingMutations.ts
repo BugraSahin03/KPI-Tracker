@@ -1,5 +1,5 @@
 import { DEFAULT_PROFILE_ID, type AppData, type DataMutation, type ProfileId } from '../types.js'
-import { isBodyMetric, isEntry, isGoal, isGymSession, isGymTemplate } from './storage.js'
+import { isBodyMetric, isEntry, isGoal, isGymSession, isGymTemplate, isRunningSession, isWeeklyGoal, isWeeklyGoalAdjustment } from './storage.js'
 
 export const PENDING_MUTATIONS_STORAGE_KEY = 'pace-pending-mutations-v2'
 export type PendingMutation = { profileId: ProfileId; mutation: DataMutation }
@@ -35,6 +35,15 @@ export function isDataMutation(value: unknown): value is DataMutation {
   if (value.kind === 'gym.template.delete') return isIdentifier(value.templateId)
   if (value.kind === 'gym.session.complete') return isGymSession(value.session)
   if (value.kind === 'gym.session.delete') return isIdentifier(value.sessionId)
+  if (value.kind === 'run.create') return isRunningSession(value.run)
+  if (value.kind === 'run.delete') return isIdentifier(value.runId)
+  if (value.kind === 'weekly-goal.upsert') return isWeeklyGoal(value.goal)
+  if (value.kind === 'weekly-goal.delete') return isIdentifier(value.goalId)
+  if (value.kind === 'weekly-goal.adjust') {
+    const adjustment = value.adjustment
+    if (isRecord(adjustment) && adjustment.status === 'open') return isIdentifier(adjustment.goalId) && typeof adjustment.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(adjustment.date) && typeof adjustment.updatedAt === 'string' && !Number.isNaN(Date.parse(adjustment.updatedAt))
+    return isWeeklyGoalAdjustment(adjustment)
+  }
   if (value.kind === 'gym.exercise.merge') return isIdentifier(value.sourceExerciseId) && isIdentifier(value.targetExerciseId) && value.sourceExerciseId !== value.targetExerciseId &&
     typeof value.expectedSourceName === 'string' && value.expectedSourceName.trim().length > 0 && typeof value.expectedTargetName === 'string' && value.expectedTargetName.trim().length > 0
   if (value.kind === 'gym.exercise.rename') return isIdentifier(value.exerciseId) && typeof value.expectedName === 'string' && value.expectedName.trim().length > 0 &&
@@ -108,9 +117,6 @@ export function applyPendingMutations(data: AppData, mutations: PendingMutation[
     if (mutation.kind === 'gym.template.delete') return {
       ...current,
       gymTemplates: current.gymTemplates.filter((template) => template.id !== mutation.templateId),
-      gymSessions: current.gymSessions.map((session) => session.templateId === mutation.templateId
-        ? { ...session, templateId: undefined }
-        : session),
     }
     if (mutation.kind === 'gym.session.complete') return {
       ...current,
@@ -119,6 +125,18 @@ export function applyPendingMutations(data: AppData, mutations: PendingMutation[
         : [...current.gymSessions, mutation.session],
     }
     if (mutation.kind === 'gym.session.delete') return { ...current, gymSessions: current.gymSessions.filter((session) => session.id !== mutation.sessionId) }
+    if (mutation.kind === 'run.create') return { ...current, runs: (current.runs ?? []).some((run) => run.id === mutation.run.id) ? current.runs : [...(current.runs ?? []), mutation.run] }
+    if (mutation.kind === 'run.delete') return { ...current, runs: (current.runs ?? []).filter((run) => run.id !== mutation.runId) }
+    if (mutation.kind === 'weekly-goal.upsert') return { ...current, weeklyGoals: upsertById(current.weeklyGoals ?? [], mutation.goal) }
+    if (mutation.kind === 'weekly-goal.delete') return {
+      ...current,
+      weeklyGoals: (current.weeklyGoals ?? []).filter((goal) => goal.id !== mutation.goalId),
+      weeklyGoalAdjustments: (current.weeklyGoalAdjustments ?? []).filter((item) => item.goalId !== mutation.goalId),
+    }
+    if (mutation.kind === 'weekly-goal.adjust') {
+      const weeklyGoalAdjustments = (current.weeklyGoalAdjustments ?? []).filter((item) => !(item.goalId === mutation.adjustment.goalId && item.date === mutation.adjustment.date))
+      return mutation.adjustment.status === 'open' ? { ...current, weeklyGoalAdjustments } : { ...current, weeklyGoalAdjustments: [...weeklyGoalAdjustments, mutation.adjustment] }
+    }
     if (mutation.kind === 'gym.exercise.merge') {
       const target = current.gymExercises?.find((exercise) => exercise.id === mutation.targetExerciseId)
       if (!target) return current

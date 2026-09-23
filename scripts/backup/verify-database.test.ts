@@ -25,16 +25,16 @@ afterEach(() => {
 })
 
 describe('Production-Datenbankverifier', () => {
-  it('akzeptiert ausschließlich eine vollständige Schema-10-Pace-Datenbank', async () => {
+  it('akzeptiert ausschließlich eine vollständige Schema-12-Pace-Datenbank', async () => {
     const filename = databaseFile()
-    await expect(execFileAsync(process.execPath, [verifier, filename])).resolves.toMatchObject({ stdout: expect.stringContaining('Schema 10') })
+    await expect(execFileAsync(process.execPath, [verifier, filename])).resolves.toMatchObject({ stdout: expect.stringContaining('Schema 12') })
   })
 
   it('lehnt zu neue Schemas, fehlende Profile/Tabellen und Fremdschlüsselfehler ab', async () => {
     for (const corruption of ['schema', 'profile', 'table', 'alias-table', 'foreign-key'] as const) {
       const filename = databaseFile()
       const database = new Database(filename)
-      if (corruption === 'schema') database.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES (11,?)').run(new Date().toISOString())
+      if (corruption === 'schema') database.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES (13,?)').run(new Date().toISOString())
       if (corruption === 'profile') database.prepare("DELETE FROM profiles WHERE id='profile-sena'").run()
       if (corruption === 'table') { database.pragma('foreign_keys=OFF'); database.exec('DROP TABLE app_state') }
       if (corruption === 'alias-table') { database.pragma('foreign_keys=OFF'); database.exec('DROP TABLE gym_exercise_aliases') }
@@ -49,7 +49,7 @@ describe('Production-Datenbankverifier', () => {
 
   it('führt den Migrationsmodus ausdrücklich nur auf einer temporären Kopie aus', () => {
     const source = fs.readFileSync(verifier, 'utf8')
-    expect(source).toContain("argumentsList[1] !== '1..9'")
+    expect(source).toContain("argumentsList[1] !== '1..11'")
     expect(source).toContain("await copySource.backup(temporaryPath)")
     expect(source).toContain("new module.PaceDatabase(temporaryPath)")
     expect(source).not.toContain('new module.PaceDatabase(databasePath)')

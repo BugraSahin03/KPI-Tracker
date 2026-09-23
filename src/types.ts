@@ -116,6 +116,77 @@ export interface GymExercise {
   updatedAt: string
 }
 
+export type RunEnvironment = 'indoor' | 'outdoor'
+
+export interface RunningSession {
+  id: string
+  environment: RunEnvironment
+  date: string
+  /** Local wall-clock time from the Fitness summary, when visible. */
+  startTime?: string
+  durationSeconds: number
+  distanceKm: number
+  /** Stored snapshot; must stay close to duration / distance. */
+  averagePaceSecondsPerKm: number
+  averageHeartRateBpm?: number
+  effort?: number
+  activeCalories?: number
+  totalCalories?: number
+  elevationGainM?: number
+  averagePowerWatts?: number
+  averageCadenceSpm?: number
+  source: 'screenshot' | 'manual' | 'shortcut'
+  /** Stable duplicate guard without retaining the source image. */
+  fingerprint: string
+  createdAt: string
+}
+
+export type WeeklyGoalSourceType = 'gym' | 'run' | 'manual'
+export type WeeklyGoalRunEnvironment = 'any' | RunEnvironment
+export type WeeklyGoalAdjustmentStatus = 'done' | 'sick' | 'injured'
+export type WeeklyGoalIcon = 'gym' | 'run' | 'calendar' | 'custom'
+
+/** A dated snapshot keeps edits and pauses from changing older ISO weeks. */
+export interface WeeklyGoalDefinition {
+  effectiveFrom: string
+  /** Exclusive local date key. */
+  effectiveTo?: string
+  name: string
+  targetCount: number
+  sourceType: WeeklyGoalSourceType
+  gymTemplateIds?: string[]
+  /** Immutable name snapshots keep historic matching stable after a template was deleted. */
+  gymTemplateNames?: string[]
+  runEnvironment?: WeeklyGoalRunEnvironment
+  color: string
+  icon: WeeklyGoalIcon
+  active: boolean
+  countingMode: 'unique-days'
+}
+
+export interface WeeklyGoal {
+  id: string
+  name: string
+  targetCount: number
+  sourceType: WeeklyGoalSourceType
+  gymTemplateIds?: string[]
+  runEnvironment?: WeeklyGoalRunEnvironment
+  color: string
+  icon: WeeklyGoalIcon
+  createdAt: string
+  startDate: string
+  active: boolean
+  countingMode: 'unique-days'
+  definitions: WeeklyGoalDefinition[]
+}
+
+export interface WeeklyGoalAdjustment {
+  goalId: string
+  date: string
+  status: WeeklyGoalAdjustmentStatus
+  updatedAt: string
+}
+
 export interface AppData {
   version: 3
   goals: Goal[]
@@ -125,6 +196,11 @@ export interface AppData {
   gymSessions: GymSession[]
   /** Canonical profile exercise library. Missing only in legacy local payloads. */
   gymExercises?: GymExercise[]
+  /** Runs were added without changing the legacy envelope version. */
+  runs?: RunningSession[]
+  /** Weekly goals were added without changing the legacy envelope version. */
+  weeklyGoals?: WeeklyGoal[]
+  weeklyGoalAdjustments?: WeeklyGoalAdjustment[]
 }
 
 export type DataMutation =
@@ -137,6 +213,11 @@ export type DataMutation =
   | { id: string; kind: 'gym.template.delete'; templateId: string }
   | { id: string; kind: 'gym.session.complete'; session: GymSession }
   | { id: string; kind: 'gym.session.delete'; sessionId: string }
+  | { id: string; kind: 'run.create'; run: RunningSession }
+  | { id: string; kind: 'run.delete'; runId: string }
+  | { id: string; kind: 'weekly-goal.upsert'; goal: WeeklyGoal }
+  | { id: string; kind: 'weekly-goal.delete'; goalId: string }
+  | { id: string; kind: 'weekly-goal.adjust'; adjustment: WeeklyGoalAdjustment | { goalId: string; date: string; status: 'open'; updatedAt: string } }
   | { id: string; kind: 'gym.exercise.merge'; sourceExerciseId: string; targetExerciseId: string; expectedSourceName: string; expectedTargetName: string }
   | { id: string; kind: 'gym.exercise.rename'; exerciseId: string; expectedName: string; expectedUpdatedAt: string; name: string; updatedAt: string }
 

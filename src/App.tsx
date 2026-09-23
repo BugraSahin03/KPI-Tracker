@@ -41,7 +41,7 @@ import {
   startOfMonth,
 } from 'date-fns'
 import { de } from 'date-fns/locale'
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from 'react'
 import { createPortal } from 'react-dom'
 import './App.css'
 import {
@@ -61,7 +61,18 @@ import { DEFAULT_PROFILE_ID, type AppData, type BodyMetric, type DataMutation, t
 import { createDemoData } from './lib/demo'
 import { api, ApiError, type GoogleHealthStatus } from './lib/api'
 import { applyPendingMutations, loadPendingMutations, persistPendingMutations, type PendingMutation } from './lib/pendingMutations'
+import {
+  analysisGoalSelectionStorageKey,
+  loadAnalysisGoalSelection,
+  reconcileAnalysisGoalSelection,
+  saveAnalysisGoalSelection,
+  selectedAnalysisGoalIds,
+  toggleAnalysisGoal,
+  type AnalysisGoalSelection,
+} from './lib/analysisGoalSelection'
 import GymView, { type GymMutationIntent } from './GymView'
+import RunImport from './RunImport'
+import { WeeklyGoalInsights, WeeklyGoalsManager, WeeklyTodaySection } from './WeeklyGoals'
 
 type Tab = 'today' | 'gym' | 'insights' | 'goals' | 'body'
 
@@ -115,7 +126,7 @@ function useLocalTodayKey() {
 }
 
 function emptyData(): AppData {
-  return { version: 3, goals: [], entries: [], bodyMetrics: [], gymTemplates: [], gymSessions: [], gymExercises: [] }
+  return { version: 3, goals: [], entries: [], bodyMetrics: [], gymTemplates: [], gymSessions: [], gymExercises: [], runs: [], weeklyGoals: [], weeklyGoalAdjustments: [] }
 }
 
 function storedProfile(key: string): ProfileId {
@@ -357,12 +368,14 @@ function TodayView({
   onDate,
   onStatus,
   onOpenGoals,
+  onChange,
 }: {
   data: AppData
   selectedDate: string
   onDate: (date: string) => void
   onStatus: (goalId: string, status: GoalStatus) => void
   onOpenGoals: () => void
+  onChange: (data: AppData) => void
 }) {
   const goals = goalsForDate(data, selectedDate)
   const done = goals.filter((goal) => statusFor(data, goal.id, selectedDate) === 'done').length
@@ -427,6 +440,7 @@ function TodayView({
           </p>
         </div>
       )}
+      <WeeklyTodaySection data={data} selectedDate={selectedDate} onChange={onChange} onOpenGoals={onOpenGoals} />
     </section>
   )
 }
@@ -628,6 +642,7 @@ function YearDayTile({
 
 function HistoryView({
   data,
+  goalFilter,
   onSelectDay,
   period,
   anchor,
@@ -636,6 +651,7 @@ function HistoryView({
   onAnchorChange,
 }: {
   data: AppData
+  goalFilter: React.ReactNode
   onSelectDay: (date: string) => void
   period: Period
   anchor: Date
@@ -661,6 +677,7 @@ function HistoryView({
   return (
     <section className="view">
       <PageIntro eyebrow="Dein Rhythmus" title="Verlauf" />
+      {goalFilter}
       <PeriodControl value={period} onChange={onPeriodChange} />
       <DateStepper
         label={periodLabel(period, anchor)}
@@ -768,15 +785,102 @@ function InsightsView({ data, period, anchor, currentToday }: { data: AppData; p
   )
 }
 
-function AnalysisView({ data, onSelectDay }: { data: AppData; onSelectDay: (date: string) => void }) {
+function AnalysisGoalFilter({
+  goals,
+  selection,
+  onSelectionChange,
+}: {
+  goals: Goal[]
+  selection: AnalysisGoalSelection
+  onSelectionChange: (selection: AnalysisGoalSelection) => void
+}) {
+  const availableGoalIds = goals.map((goal) => goal.id)
+  const selectedGoalIds = selectedAnalysisGoalIds(selection, availableGoalIds)
+  const selected = new Set(selectedGoalIds)
+
+  return (
+    <section className="analysis-goal-filter" aria-labelledby="analysis-goal-filter-title">
+      <header>
+        <div>
+          <p>Auswahl</p>
+          <h2 id="analysis-goal-filter-title">Ziele analysieren</h2>
+        </div>
+        {goals.length > 0 && <span>{selectedGoalIds.length}/{goals.length}</span>}
+      </header>
+      {goals.length > 0 ? (
+        <div className="analysis-goal-options" role="group" aria-label="Ziele für die Analyse auswählen">
+          <button
+            type="button"
+            className="analysis-goal-option all-goals"
+            aria-pressed={selection.mode === 'all'}
+            onClick={() => onSelectionChange({ mode: 'all' })}
+          >
+            <span><Target size={18} aria-hidden="true" /></span>
+            <strong>Alle</strong>
+            {selection.mode === 'all' && <Check size={15} aria-hidden="true" />}
+          </button>
+          {goals.map((goal) => {
+            const isSelected = selected.has(goal.id)
+            const isOnlySelection = selection.mode === 'custom' && isSelected && selectedGoalIds.length === 1
+            const actionLabel = selection.mode === 'all'
+              ? `${goal.name} einzeln analysieren`
+              : isOnlySelection
+                ? `${goal.name} ausgewählt – mindestens ein Ziel erforderlich`
+                : `${goal.name} ${isSelected ? 'abwählen' : 'auswählen'}`
+            return (
+              <button
+                type="button"
+                className="analysis-goal-option"
+                style={{ '--goal-filter-color': goal.color } as CSSProperties}
+                aria-pressed={isSelected}
+                aria-label={actionLabel}
+                onClick={() => onSelectionChange(toggleAnalysisGoal(selection, goal.id, availableGoalIds))}
+                key={goal.id}
+              >
+                <span><GoalGlyph icon={goal.icon} size={18} /></span>
+                <strong>{goal.name}</strong>
+                {isSelected && <Check size={15} aria-hidden="true" />}
+              </button>
+            )
+          })}
+        </div>
+      ) : (
+        <p className="analysis-goal-empty">Noch keine Ziele definiert.</p>
+      )}
+    </section>
+  )
+}
+
+function AnalysisView({ data, onSelectDay, selectionStorageKey }: { data: AppData; onSelectDay: (date: string) => void; selectionStorageKey: string }) {
   const [period, setPeriod] = useState<Period>('month')
   const [anchor, setAnchor] = useState(new Date())
+  const [goalSelection, setGoalSelection] = useState<AnalysisGoalSelection>(() => loadAnalysisGoalSelection(selectionStorageKey))
   const currentToday = useLocalTodayKey()
+  const availableGoalIds = useMemo(() => data.goals.map((goal) => goal.id), [data.goals])
+  const normalizedSelection = useMemo(
+    () => reconcileAnalysisGoalSelection(goalSelection, availableGoalIds),
+    [goalSelection, availableGoalIds],
+  )
+  const selectedGoalIds = useMemo(
+    () => selectedAnalysisGoalIds(normalizedSelection, availableGoalIds),
+    [normalizedSelection, availableGoalIds],
+  )
+  const selectedGoalSet = useMemo(() => new Set(selectedGoalIds), [selectedGoalIds])
+  const analysisData = useMemo(() => ({
+    ...data,
+    goals: data.goals.filter((goal) => selectedGoalSet.has(goal.id)),
+    entries: data.entries.filter((entry) => selectedGoalSet.has(entry.goalId)),
+  }), [data, selectedGoalSet])
+
+  useEffect(() => {
+    saveAnalysisGoalSelection(selectionStorageKey, normalizedSelection)
+  }, [normalizedSelection, selectionStorageKey])
 
   return (
     <div className="analysis-combined" aria-label="Analyse">
       <HistoryView
-        data={data}
+        data={analysisData}
+        goalFilter={<AnalysisGoalFilter goals={data.goals} selection={normalizedSelection} onSelectionChange={setGoalSelection} />}
         onSelectDay={onSelectDay}
         period={period}
         anchor={anchor}
@@ -784,7 +888,8 @@ function AnalysisView({ data, onSelectDay }: { data: AppData; onSelectDay: (date
         onPeriodChange={setPeriod}
         onAnchorChange={setAnchor}
       />
-      <InsightsView data={data} period={period} anchor={anchor} currentToday={currentToday} />
+      <InsightsView data={analysisData} period={period} anchor={anchor} currentToday={currentToday} />
+      <WeeklyGoalInsights data={data} period={period} anchor={anchor} />
     </div>
   )
 }
@@ -1060,6 +1165,7 @@ function GoalsView({
       <button type="button" className="outline-button full" onClick={() => setEditing('new')}>
         <Plus size={19} /> Neues Tagesziel
       </button>
+      <WeeklyGoalsManager data={data} onChange={onChange} />
       {editing && (
         <GoalForm goal={editing === 'new' ? undefined : editing} onSave={save} onCancel={() => setEditing(null)} />
       )}
@@ -1288,7 +1394,7 @@ function BodyView({
 
 const navItems: { id: Tab; label: string; icon: typeof Activity }[] = [
   { id: 'today', label: 'Heute', icon: Target },
-  { id: 'gym', label: 'GYM', icon: Dumbbell },
+  { id: 'gym', label: 'Training', icon: Dumbbell },
   { id: 'insights', label: 'Analyse', icon: BarChart3 },
   { id: 'goals', label: 'Ziele', icon: Settings2 },
   { id: 'body', label: 'Körper', icon: Scale },
@@ -1316,6 +1422,7 @@ function App() {
   const processMutationsRef = useRef<() => void>(() => undefined)
   const [tab, setTab] = useState<Tab>('today')
   const [gymEditorDirty, setGymEditorDirty] = useState(false)
+  const [runImportOpen, setRunImportOpen] = useState(false)
   const [selectedDate, setSelectedDate] = useState(todayKey())
 
   const processMutations = useCallback(async () => {
@@ -1516,10 +1623,10 @@ function App() {
           {isDemo && <DemoBanner />}
           {serverError && !isDemo && <aside className="error-banner" role="alert">{serverError}<button type="button" onClick={() => pendingMutationCount ? void processMutations() : window.location.reload()}>{pendingMutationCount ? 'Erneut speichern' : 'Neu laden'}</button></aside>}
           {tab === 'today' && (
-            <TodayView data={data} selectedDate={selectedDate} onDate={setSelectedDate} onStatus={updateStatus} onOpenGoals={() => changeTab('goals')} />
+            <TodayView data={data} selectedDate={selectedDate} onDate={setSelectedDate} onStatus={updateStatus} onOpenGoals={() => changeTab('goals')} onChange={commitData} />
           )}
-          {tab === 'gym' && <GymView key={activeProfileId} data={data} onChange={commitData} draftStorageKey={isDemo ? `pace-gym-demo-draft-v2-${activeProfileId}` : activeProfileId === DEFAULT_PROFILE_ID ? 'pace-gym-active-draft-v1' : `pace-gym-active-draft-v2-${activeProfileId}`} onEditorDirtyChange={setGymEditorDirty} />}
-          {tab === 'insights' && <AnalysisView data={data} onSelectDay={openDay} />}
+          {tab === 'gym' && <GymView key={activeProfileId} data={data} onChange={commitData} draftStorageKey={isDemo ? `pace-gym-demo-draft-v2-${activeProfileId}` : activeProfileId === DEFAULT_PROFILE_ID ? 'pace-gym-active-draft-v1' : `pace-gym-active-draft-v2-${activeProfileId}`} onEditorDirtyChange={setGymEditorDirty} onOpenRunImport={() => setRunImportOpen(true)} />}
+          {tab === 'insights' && <AnalysisView key={`${isDemo ? 'demo' : 'live'}-${activeProfileId}`} data={data} onSelectDay={openDay} selectionStorageKey={analysisGoalSelectionStorageKey(activeProfileId, isDemo)} />}
           {tab === 'goals' && <GoalsView data={data} onChange={commitData} />}
           {tab === 'body' && <BodyView data={data} onChange={commitData} allowIntegration={googleHealthEnabled && !isDemo} />}
         </div>
@@ -1534,6 +1641,7 @@ function App() {
           )
         })}
       </nav>
+      {runImportOpen && <RunImport existingFingerprints={(data.runs ?? []).map((run) => run.fingerprint)} onClose={() => setRunImportOpen(false)} onSave={(run) => commitData({ ...data, runs: [...(data.runs ?? []), run] })} />}
     </div>
   )
 }
@@ -1577,6 +1685,21 @@ function deriveMutation(current: AppData, next: AppData): DataMutation | null {
   if (removedSession) return { id: mutationId(), kind: 'gym.session.delete', sessionId: removedSession.id }
   const completedSession = next.gymSessions.find((session) => !current.gymSessions.some((item) => item.id === session.id))
   if (completedSession) return { id: mutationId(), kind: 'gym.session.complete', session: completedSession }
+  const removedRun = (current.runs ?? []).find((run) => !(next.runs ?? []).some((item) => item.id === run.id))
+  if (removedRun) return { id: mutationId(), kind: 'run.delete', runId: removedRun.id }
+  const createdRun = (next.runs ?? []).find((run) => !(current.runs ?? []).some((item) => item.id === run.id))
+  if (createdRun) return { id: mutationId(), kind: 'run.create', run: createdRun }
+  const removedWeeklyGoal = (current.weeklyGoals ?? []).find((goal) => !(next.weeklyGoals ?? []).some((item) => item.id === goal.id))
+  if (removedWeeklyGoal) return { id: mutationId(), kind: 'weekly-goal.delete', goalId: removedWeeklyGoal.id }
+  const changedWeeklyGoal = (next.weeklyGoals ?? []).find((goal) => JSON.stringify(goal) !== JSON.stringify((current.weeklyGoals ?? []).find((item) => item.id === goal.id)))
+  if (changedWeeklyGoal) return { id: mutationId(), kind: 'weekly-goal.upsert', goal: changedWeeklyGoal }
+  const weeklyAdjustmentKeys = new Set([...(current.weeklyGoalAdjustments ?? []), ...(next.weeklyGoalAdjustments ?? [])].map((item) => `${item.goalId}\0${item.date}`))
+  for (const key of weeklyAdjustmentKeys) {
+    const [goalId, date] = key.split('\0')
+    const before = (current.weeklyGoalAdjustments ?? []).find((item) => item.goalId === goalId && item.date === date)
+    const after = (next.weeklyGoalAdjustments ?? []).find((item) => item.goalId === goalId && item.date === date)
+    if (JSON.stringify(before) !== JSON.stringify(after)) return { id: mutationId(), kind: 'weekly-goal.adjust', adjustment: after ?? { goalId, date, status: 'open', updatedAt: new Date().toISOString() } }
+  }
   const removedGoal = current.goals.find((goal) => !next.goals.some((item) => item.id === goal.id))
   if (removedGoal) return { id: mutationId(), kind: 'goal.delete', goalId: removedGoal.id }
   const changedGoal = next.goals.find((goal) => JSON.stringify(goal) !== JSON.stringify(current.goals.find((item) => item.id === goal.id)))

@@ -1,11 +1,11 @@
-import { ArrowLeft, ArrowRight, BookOpen, Check, ChevronDown, ChevronUp, Dumbbell, Eye, Link2, Pencil, Plus, TrendingUp, Trash2, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, BookOpen, Check, ChevronDown, ChevronUp, Dumbbell, Eye, Footprints, Link2, Pencil, Plus, TrendingUp, Trash2, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { formatShortDate, historyDateGroup, todayKey } from './lib/date'
 import { formatDecimalInput, parseDecimalInput } from './lib/decimal'
 import { formatRepTarget, parseRepTarget } from './lib/reps'
 import { isGymSession, legacyGymSetId, makeId } from './lib/storage'
-import type { AppData, DataMutation, GymExercise, GymSession, GymSessionExercise, GymSessionSet, GymTemplate, GymTemplateExercise } from './types'
+import type { AppData, DataMutation, GymExercise, GymSession, GymSessionExercise, GymSessionSet, GymTemplate, GymTemplateExercise, RunningSession } from './types'
 
 type WithoutMutationId<T> = T extends { id: string } ? Omit<T, 'id'> : never
 export type GymMutationIntent = WithoutMutationId<Extract<DataMutation, { kind: 'gym.template.upsert' | 'gym.exercise.merge' | 'gym.exercise.rename' }>>
@@ -15,6 +15,7 @@ type GymViewProps = {
   onChange: (data: AppData, mutations?: GymMutationIntent[]) => boolean | void
   draftStorageKey?: string
   onEditorDirtyChange?: (dirty: boolean) => void
+  onOpenRunImport?: () => void
 }
 
 export const GYM_DRAFT_STORAGE_KEY = 'pace-gym-active-draft-v1'
@@ -473,6 +474,10 @@ type GymHistoryWeek = { key: string; label: string; sessions: GymSession[] }
 type GymHistoryMonth = { key: string; label: string; weeks: GymHistoryWeek[] }
 type GymHistoryYear = { key: string; months: GymHistoryMonth[] }
 
+type RunHistoryWeek = { key: string; label: string; sessions: RunningSession[] }
+type RunHistoryMonth = { key: string; label: string; weeks: RunHistoryWeek[] }
+type RunHistoryYear = { key: string; months: RunHistoryMonth[] }
+
 function groupGymHistory(sessions: GymSession[]): GymHistoryYear[] {
   const years: GymHistoryYear[] = []
   for (const session of sessions) {
@@ -497,6 +502,21 @@ function groupGymHistory(sessions: GymSession[]): GymHistoryYear[] {
   return years
 }
 
+function groupRunHistory(sessions: RunningSession[]): RunHistoryYear[] {
+  const years: RunHistoryYear[] = []
+  for (const session of sessions) {
+    const group = historyDateGroup(session.date)
+    let year = years.at(-1)
+    if (year?.key !== group.calendarYear) { year = { key: group.calendarYear, months: [] }; years.push(year) }
+    let month = year.months.at(-1)
+    if (month?.key !== group.monthKey) { month = { key: group.monthKey, label: group.monthLabel, weeks: [] }; year.months.push(month) }
+    let week = month.weeks.at(-1)
+    if (week?.key !== group.isoWeekKey) { week = { key: group.isoWeekKey, label: group.isoWeekLabel, sessions: [] }; month.weeks.push(week) }
+    week.sessions.push(session)
+  }
+  return years
+}
+
 function defaultOpenHistoryMonth(sessions: GymSession[], currentDate = todayKey()) {
   const currentMonth = currentDate.slice(0, 7)
   if (sessions.some((session) => session.date.slice(0, 7) === currentMonth)) return currentMonth
@@ -504,6 +524,23 @@ function defaultOpenHistoryMonth(sessions: GymSession[], currentDate = todayKey(
     const month = session.date.slice(0, 7)
     return latest === null || month > latest ? month : latest
   }, null)
+}
+
+function defaultOpenRunHistoryMonth(sessions: RunningSession[], currentDate = todayKey()) {
+  const currentMonth = currentDate.slice(0, 7)
+  if (sessions.some((session) => session.date.slice(0, 7) === currentMonth)) return currentMonth
+  return sessions.reduce<string | null>((latest, session) => latest === null || session.date.slice(0, 7) > latest ? session.date.slice(0, 7) : latest, null)
+}
+
+function runDuration(seconds: number) {
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const remainder = seconds % 60
+  return hours ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}` : `${minutes}:${String(remainder).padStart(2, '0')}`
+}
+
+function runPace(seconds: number) {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} /km`
 }
 
 function exerciseHistoryKey(exercise: GymSessionExercise) {
@@ -553,7 +590,7 @@ function historicalWeightIncreases(sessions: GymSession[]) {
   return increased
 }
 
-export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_STORAGE_KEY, onEditorDirtyChange }: GymViewProps) {
+export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_STORAGE_KEY, onEditorDirtyChange, onOpenRunImport }: GymViewProps) {
   const library = useMemo<GymExercise[]>(() => data.gymExercises?.length ? data.gymExercises : data.gymTemplates.flatMap((template) => template.exercises.map((exercise) => ({
     id: exercise.exerciseId ?? exercise.id, name: exercise.name, createdAt: template.createdAt, updatedAt: template.updatedAt,
   }))), [data.gymExercises, data.gymTemplates])
@@ -570,12 +607,21 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
   const [editingTemplate, setEditingTemplate] = useState<GymTemplate | 'new' | null>(null)
   const [pendingTemplate, setPendingTemplate] = useState<GymTemplate | null>(null)
   const [view, setView] = useState<'landing' | 'history' | 'manage' | 'library'>('landing')
+  const [historyCategory, setHistoryCategory] = useState<'gym' | 'running'>('gym')
   const [mergeSourceId, setMergeSourceId] = useState<string | null>(null)
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null)
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(null)
   const [openHistoryMonths, setOpenHistoryMonths] = useState<Set<string>>(() => {
     const defaultMonth = defaultOpenHistoryMonth(data.gymSessions)
     return new Set(defaultMonth ? [defaultMonth] : [])
   })
+  const [openRunHistoryMonths, setOpenRunHistoryMonths] = useState<Set<string>>(() => {
+    const defaultMonth = defaultOpenRunHistoryMonth(data.runs ?? [])
+    return new Set(defaultMonth ? [defaultMonth] : [])
+  })
+  const currentRunHistoryMonth = todayKey().slice(0, 7)
+  const currentRunHistoryMonthAvailable = (data.runs ?? []).some((run) => run.date.slice(0, 7) === currentRunHistoryMonth)
+  const hadCurrentRunHistoryMonthRef = useRef(currentRunHistoryMonthAvailable)
   const currentHistoryMonth = todayKey().slice(0, 7)
   const currentHistoryMonthAvailable = data.gymSessions.some((session) => session.date.slice(0, 7) === currentHistoryMonth)
   const hadCurrentHistoryMonthRef = useRef(currentHistoryMonthAvailable)
@@ -614,6 +660,13 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
     }
     hadCurrentHistoryMonthRef.current = currentHistoryMonthAvailable
   }, [currentHistoryMonth, currentHistoryMonthAvailable])
+
+  useEffect(() => {
+    if (currentRunHistoryMonthAvailable && !hadCurrentRunHistoryMonthRef.current) {
+      setOpenRunHistoryMonths((current) => new Set([...current, currentRunHistoryMonth]))
+    }
+    hadCurrentRunHistoryMonthRef.current = currentRunHistoryMonthAvailable
+  }, [currentRunHistoryMonth, currentRunHistoryMonthAvailable])
 
   const requestStart = (template: GymTemplate) => {
     if (template.exercises.length === 0) {
@@ -771,6 +824,8 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
   const sortedSessions = useMemo(() => [...data.gymSessions].sort((a, b) =>
     b.date.localeCompare(a.date) || gymSessionCompletionTime(b) - gymSessionCompletionTime(a) || b.id.localeCompare(a.id)), [data.gymSessions])
   const historyGroups = useMemo(() => groupGymHistory(sortedSessions), [sortedSessions])
+  const sortedRuns = useMemo(() => [...(data.runs ?? [])].sort((a, b) => b.date.localeCompare(a.date) || (b.startTime ?? '').localeCompare(a.startTime ?? '') || b.createdAt.localeCompare(a.createdAt)), [data.runs])
+  const runHistoryGroups = useMemo(() => groupRunHistory(sortedRuns), [sortedRuns])
   const weightIncreases = useMemo(() => historicalWeightIncreases(data.gymSessions), [data.gymSessions])
   const previousByTemplateExercise = useMemo(() => {
     return latestExercisesByTemplateId([...data.gymSessions], draft?.startedAt ?? new Date().toISOString())
@@ -793,6 +848,19 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
       return next
     })
   }
+  const toggleRunHistoryMonth = (monthKey: string) => {
+    setOpenRunHistoryMonths((current) => {
+      const next = new Set(current)
+      if (next.has(monthKey)) next.delete(monthKey)
+      else next.add(monthKey)
+      return next
+    })
+  }
+  const removeRun = (run: RunningSession) => {
+    if (!window.confirm(`Lauf vom ${formatShortDate(run.date)} wirklich löschen?`)) return
+    const accepted = onChange({ ...data, runs: (data.runs ?? []).filter((item) => item.id !== run.id) })
+    if (accepted !== false && expandedRunId === run.id) setExpandedRunId(null)
+  }
 
   const requestFinish = () => {
     const invalidExercise = draft?.exercises.find((exercise) => !validDraftExercise(exercise, setWeightInputs, setRepsInputs))
@@ -811,9 +879,10 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
         <>
           <header className="page-intro gym-landing-head">
             <button type="button" className="round-action" onClick={() => setView('history')} aria-label="Trainingsverlauf öffnen"><Eye /></button>
-            <div><p className="eyebrow">Dein Training</p><h1>GYM</h1></div>
+            <div><p className="eyebrow">Dein Training</p><h1>Training</h1></div>
             <button type="button" className="round-action" onClick={() => setView('manage')} aria-label="Einheiten verwalten"><Pencil /></button>
           </header>
+          <h2 className="training-section-label">GYM</h2>
           <div className="gym-split-grid" aria-label="Training auswählen">
             {data.gymTemplates.map((template) => (
               <button type="button" className="gym-split-card gym-split-start" key={template.id} onClick={() => requestStart(template)} aria-label={template.exercises.length ? `${template.name} starten` : `${template.name} bearbeiten`} aria-haspopup={template.exercises.length ? 'dialog' : undefined}>
@@ -823,6 +892,11 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
               </button>
             ))}
             {data.gymTemplates.length === 0 && <div className="empty-state compact"><Dumbbell /><h2>Noch keine Einheit</h2><p>Lege in der Verwaltung deinen ersten Trainingsplan an.</p></div>}
+            <button type="button" className="gym-split-card gym-split-start run-split-start" onClick={onOpenRunImport} aria-label="Lauf per Screenshot hinzufügen">
+              <span className="gym-split-icon"><Footprints /></span>
+              <strong>Laufen</strong>
+              <small>Screenshot importieren</small>
+            </button>
           </div>
         </>
       )}
@@ -830,11 +904,15 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
       {!draft && view === 'history' && (
         <section className="gym-subview" aria-labelledby="gym-history-title">
           <header className="gym-subview-head">
-            <button type="button" className="round-action" onClick={() => setView('landing')} aria-label="Zurück zu GYM"><ArrowLeft /></button>
+            <button type="button" className="round-action" onClick={() => setView('landing')} aria-label="Zurück zu Training"><ArrowLeft /></button>
             <div><p className="eyebrow">Absolvierte Einheiten</p><h1 id="gym-history-title">Verlauf</h1></div>
             <span aria-hidden="true" />
           </header>
-          <div className="gym-history-list">
+          <div className="history-category-switch" aria-label="Trainingsart">
+            <button type="button" className={historyCategory === 'gym' ? 'active' : ''} aria-pressed={historyCategory === 'gym'} onClick={() => setHistoryCategory('gym')}><Dumbbell /> GYM</button>
+            <button type="button" className={historyCategory === 'running' ? 'active' : ''} aria-pressed={historyCategory === 'running'} onClick={() => setHistoryCategory('running')}><Footprints /> Laufen</button>
+          </div>
+          {historyCategory === 'gym' && <div className="gym-history-list">
             {historyGroups.map((year) => (
               <section className="gym-history-year" key={year.key} aria-labelledby={`gym-history-year-${year.key}`}>
                 <h2 id={`gym-history-year-${year.key}`}>{year.key}</h2>
@@ -904,14 +982,67 @@ export default function GymView({ data, onChange, draftStorageKey = GYM_DRAFT_ST
               </section>
             ))}
             {sortedSessions.length === 0 && <div className="empty-state compact"><Dumbbell /><h2>Noch kein Training</h2><p>Deine abgeschlossenen Einheiten erscheinen hier.</p></div>}
-          </div>
+          </div>}
+          {historyCategory === 'running' && <div className="gym-history-list run-history-list">
+            {runHistoryGroups.map((year) => (
+              <section className="gym-history-year" key={year.key} aria-labelledby={`run-history-year-${year.key}`}>
+                <h2 id={`run-history-year-${year.key}`}>{year.key}</h2>
+                {year.months.map((month) => {
+                  const expanded = openRunHistoryMonths.has(month.key)
+                  const sessionCount = month.weeks.reduce((count, week) => count + week.sessions.length, 0)
+                  const contentId = `run-history-month-content-${month.key}`
+                  return <section className={`gym-history-month${expanded ? ' is-expanded' : ''}`} key={month.key} aria-labelledby={`run-history-month-${month.key}`}>
+                    <h3 className="gym-history-month-heading" id={`run-history-month-${month.key}`} aria-label={month.label}>
+                      <button type="button" className="gym-history-month-toggle" aria-expanded={expanded} aria-controls={contentId} onClick={() => toggleRunHistoryMonth(month.key)}>
+                        <span className="gym-history-month-name">{month.label}</span>
+                        <span className="gym-history-month-count">{sessionCount} {sessionCount === 1 ? 'Lauf' : 'Läufe'}</span>
+                        {expanded ? <ChevronUp aria-hidden="true" /> : <ChevronDown aria-hidden="true" />}
+                      </button>
+                    </h3>
+                    <div className="gym-history-month-content" id={contentId} hidden={!expanded}>
+                      {month.weeks.map((week) => <section className="gym-history-week" key={`${month.key}-${week.key}`} aria-labelledby={`run-history-week-${month.key}-${week.key}`}>
+                        <div className="gym-history-week-head"><h4 id={`run-history-week-${month.key}-${week.key}`}>{week.label}</h4><span>{week.sessions.length} {week.sessions.length === 1 ? 'Lauf' : 'Läufe'}</span></div>
+                        <div className="gym-history-week-list">
+                          {week.sessions.map((run) => {
+                            const runExpanded = expandedRunId === run.id
+                            const detailsId = `run-history-details-${run.id}`
+                            return <article className="gym-history-card run-history-card" key={run.id}>
+                              <button type="button" className="gym-history-summary run-history-summary" aria-label={`${formatShortDate(run.date)}${run.startTime ? `, ${run.startTime} Uhr` : ''}: ${run.environment === 'outdoor' ? 'Outdoor' : 'Indoor'} · ${run.distanceKm.toLocaleString('de-DE')} km · ${runDuration(run.durationSeconds)} · ${runPace(run.averagePaceSecondsPerKm)}`} aria-expanded={runExpanded} aria-controls={detailsId} onClick={() => setExpandedRunId(runExpanded ? null : run.id)}>
+                                <time dateTime={run.date}>{formatShortDate(run.date)}</time>
+                                <span><strong>{run.environment === 'outdoor' ? 'Outdoor' : 'Indoor'} · {run.distanceKm.toLocaleString('de-DE')} km</strong><small>{runDuration(run.durationSeconds)} · {runPace(run.averagePaceSecondsPerKm)}</small></span>
+                                {runExpanded ? <ChevronUp /> : <ChevronDown />}
+                              </button>
+                              {runExpanded && <div className="gym-history-details run-history-details" id={detailsId} role="region" aria-label={`Details zum Lauf vom ${formatShortDate(run.date)}`}>
+                                <dl>
+                                  {run.startTime !== undefined && <div><dt>Startzeit</dt><dd>{run.startTime} Uhr</dd></div>}
+                                  {run.averageHeartRateBpm !== undefined && <div><dt>Ø Herzfrequenz</dt><dd>{run.averageHeartRateBpm} BPM</dd></div>}
+                                  {run.effort !== undefined && <div><dt>Anstrengung</dt><dd>{run.effort}/10</dd></div>}
+                                  {run.activeCalories !== undefined && <div><dt>Aktivkalorien</dt><dd>{run.activeCalories} kcal</dd></div>}
+                                  {run.totalCalories !== undefined && <div><dt>Gesamtkalorien</dt><dd>{run.totalCalories} kcal</dd></div>}
+                                  {run.elevationGainM !== undefined && <div><dt>Höhenmeter</dt><dd>{run.elevationGainM.toLocaleString('de-DE')} m</dd></div>}
+                                  {run.averagePowerWatts !== undefined && <div><dt>Ø Leistung</dt><dd>{run.averagePowerWatts} W</dd></div>}
+                                  {run.averageCadenceSpm !== undefined && <div><dt>Ø Kadenz</dt><dd>{run.averageCadenceSpm} SPM</dd></div>}
+                                </dl>
+                                <button type="button" className="link-button danger" onClick={() => removeRun(run)}><Trash2 /> Lauf löschen</button>
+                              </div>}
+                            </article>
+                          })}
+                        </div>
+                      </section>)}
+                    </div>
+                  </section>
+                })}
+              </section>
+            ))}
+            {sortedRuns.length === 0 && <div className="empty-state compact"><Footprints /><h2>Noch kein Lauf</h2><p>Importierte Läufe erscheinen hier.</p><button type="button" className="primary-button" onClick={onOpenRunImport}>Lauf hinzufügen</button></div>}
+          </div>}
         </section>
       )}
 
       {!draft && view === 'manage' && (
         <section className="gym-subview" aria-labelledby="gym-manage-title">
           <header className="gym-subview-head">
-            <button type="button" className="round-action" onClick={() => setView('landing')} aria-label="Zurück zu GYM"><ArrowLeft /></button>
+            <button type="button" className="round-action" onClick={() => setView('landing')} aria-label="Zurück zu Training"><ArrowLeft /></button>
             <div><p className="eyebrow">Trainingspläne</p><h1 id="gym-manage-title">Einheiten</h1></div>
             <button type="button" className="round-action" onClick={() => setEditingTemplate('new')} aria-label="Einheit hinzufügen"><Plus /></button>
           </header>

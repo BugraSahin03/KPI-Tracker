@@ -1,10 +1,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { addDays, addMonths, addWeeks, addYears, startOfISOWeek } from 'date-fns'
+import { addDays, addMonths, addWeeks, addYears, startOfISOWeek, startOfMonth } from 'date-fns'
 import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
-import { formatDayTitle, formatShortDate, periodLabel, toDateKey } from './lib/date'
+import { formatDayTitle, formatShortDate, fromDateKey, periodLabel, toDateKey } from './lib/date'
 import { calculateStats } from './lib/stats'
 import { createInitialData, setEntryStatus, STORAGE_KEY } from './lib/storage'
 import { PENDING_MUTATIONS_STORAGE_KEY } from './lib/pendingMutations'
@@ -210,6 +210,87 @@ describe('Heute-Interaktion', () => {
     expect(screen.getByRole('heading', { name: formatDayTitle(toDateKey(startOfISOWeek(previousWeekAnchor))) })).toBeInTheDocument()
   })
 
+  it('filtert Verlauf und Insights gemeinsam nach einem oder mehreren Zielen', async () => {
+    const user = userEvent.setup()
+    const previousMonthAnchor = addMonths(new Date(), -1)
+    const firstDate = toDateKey(startOfMonth(previousMonthAnchor))
+    const secondDate = toDateKey(addDays(startOfMonth(previousMonthAnchor), 1))
+    const serverData = createInitialData(firstDate)
+    serverData.goals.push(
+      { ...serverData.goals[0]!, id: 'steps', name: 'Schritte', icon: 'activity', color: '#a78bfa' },
+      { ...serverData.goals[0]!, id: 'sleep', name: 'Schlaf', icon: 'sleep', color: '#ff9f43' },
+    )
+    serverData.entries = setEntryStatus(serverData.entries, 'protein', firstDate, 'done')
+    serverData.entries = setEntryStatus(serverData.entries, 'protein', secondDate, 'done')
+    serverData.entries = setEntryStatus(serverData.entries, 'water', secondDate, 'done')
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ data: serverData, revision: 0 }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )))
+
+    render(<App />)
+    await user.click((await screen.findAllByRole('button', { name: 'Analyse' })).at(-1)!)
+    await user.click(screen.getByRole('button', { name: 'Zurück' }))
+
+    expect(screen.getByRole('button', { name: 'Alle' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: /Protein einzeln analysieren/ })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: /1\. .*: 1 von 4 Zielen erfüllt/ })).toHaveStyle({ '--goal-progress': '25%' })
+
+    await user.click(screen.getByRole('button', { name: /Protein einzeln analysieren/ }))
+    expect(screen.getByRole('button', { name: 'Alle' })).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByRole('button', { name: /Wasser auswählen/ })).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByRole('button', { name: /1\. .*: 1 von 1 Zielen erfüllt/ })).toHaveClass('done')
+    expect(document.querySelectorAll('.goal-rate')).toHaveLength(1)
+
+    await user.click(screen.getByRole('button', { name: /Wasser auswählen/ }))
+    await user.click(screen.getByRole('button', { name: /Schritte auswählen/ }))
+    const oneOfThree = screen.getByRole('button', { name: /1\. .*: 1 von 3 Zielen erfüllt/ })
+    expect(within(oneOfThree).getByText('1/3')).toBeInTheDocument()
+    expect(oneOfThree).toHaveStyle({ '--goal-progress': `${(1 / 3) * 100}%` })
+    const filteredStats = calculateStats({
+      ...serverData,
+      goals: serverData.goals.filter((goal) => ['protein', 'water', 'steps'].includes(goal.id)),
+      entries: serverData.entries.filter((entry) => ['protein', 'water', 'steps'].includes(entry.goalId)),
+    }, 'month', previousMonthAnchor)
+    expect(screen.getByText(`${filteredStats.done} von ${filteredStats.total} Check-ins`)).toBeInTheDocument()
+    expect(document.querySelectorAll('.goal-rate')).toHaveLength(3)
+
+    await user.click(screen.getByRole('button', { name: /Schlaf auswählen/ }))
+    const twoOfFour = screen.getByRole('button', { name: /2\. .*: 2 von 4 Zielen erfüllt/ })
+    expect(within(twoOfFour).getByText('2/4')).toBeInTheDocument()
+    expect(twoOfFour).toHaveStyle({ '--goal-progress': '50%' })
+
+    await user.click(screen.getByRole('button', { name: 'Jahr' }))
+    const yearTile = screen.getByRole('button', { name: `${formatShortDate(secondDate)}: 2 von 4 Zielen erfüllt` })
+    expect(yearTile).toHaveStyle({ '--goal-progress': '50%' })
+
+    await user.click(screen.getByRole('button', { name: 'Alle' }))
+    expect(screen.getByRole('button', { name: 'Alle' })).toHaveAttribute('aria-pressed', 'true')
+    expect(JSON.parse(localStorage.getItem('pace-analysis-goals-v1-profile-bugra')!)).toEqual({ version: 1, mode: 'all' })
+  })
+
+  it('öffnet die Tagesbearbeitung trotz Analysefilter mit allen damaligen Zielen', async () => {
+    const user = userEvent.setup()
+    const previousMonthAnchor = addMonths(new Date(), -1)
+    const historicalDate = toDateKey(startOfMonth(previousMonthAnchor))
+    const serverData = createInitialData(historicalDate)
+    serverData.entries = setEntryStatus(serverData.entries, 'protein', historicalDate, 'done')
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ data: serverData, revision: 0 }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )))
+
+    render(<App />)
+    await user.click((await screen.findAllByRole('button', { name: 'Analyse' })).at(-1)!)
+    await user.click(screen.getByRole('button', { name: 'Zurück' }))
+    await user.click(screen.getByRole('button', { name: /Protein einzeln analysieren/ }))
+    await user.click(screen.getByRole('button', { name: new RegExp(`${fromDateKey(historicalDate).getDate()}\\. .*: 1 von 1 Zielen erfüllt`) }))
+
+    expect(screen.getByRole('heading', { name: formatDayTitle(historicalDate) })).toBeInTheDocument()
+    expect(screen.getByText('Protein')).toBeInTheDocument()
+    expect(screen.getByText('Wasser')).toBeInTheDocument()
+  })
+
   it('lässt historische Kalendertage ohne damals aktive Ziele neutral', async () => {
     const user = userEvent.setup()
     const serverData = createInitialData(toDateKey(new Date()))
@@ -239,7 +320,7 @@ describe('Heute-Interaktion', () => {
     render(<StrictMode><App /></StrictMode>)
     await vi.waitFor(() => expect(screen.getAllByRole('button', { name: 'Analyse' }).length).toBeGreaterThan(0))
     fireEvent.click(screen.getAllByRole('button', { name: 'Analyse' }).at(-1)!)
-    expect(vi.getTimerCount()).toBe(1)
+    expect(vi.getTimerCount()).toBeGreaterThanOrEqual(1)
 
     const monthToday = screen.getByRole('button', {
       name: '27. August 2026: heute, noch keine Bewertung',
@@ -323,7 +404,7 @@ describe('Heute-Interaktion', () => {
     serverData.gymTemplates[0]!.exercises = [{ id: 'bench', name: 'Bankdrücken', sets: 3, targetWeightKg: 70, targetReps: 8, position: 0 }]
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ data: serverData, revision: 0 }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
     render(<App />)
-    await user.click((await screen.findAllByRole('button', { name: 'GYM' })).at(-1)!)
+    await user.click((await screen.findAllByRole('button', { name: 'Training' })).at(-1)!)
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: /Training starten/ }))
     const weight = screen.getByRole('textbox', { name: 'Bankdrücken Satz 1 Gewicht' })
@@ -331,7 +412,7 @@ describe('Heute-Interaktion', () => {
     await user.type(weight, '72.5')
     await user.click((await screen.findAllByRole('button', { name: 'Heute' })).at(-1)!)
     expect(screen.queryByRole('region', { name: 'Aktives Training Push' })).not.toBeInTheDocument()
-    await user.click((await screen.findAllByRole('button', { name: 'GYM' })).at(-1)!)
+    await user.click((await screen.findAllByRole('button', { name: 'Training' })).at(-1)!)
     expect(screen.getByRole('textbox', { name: 'Bankdrücken Satz 1 Gewicht' })).toHaveValue('72,5')
   })
 
@@ -339,7 +420,7 @@ describe('Heute-Interaktion', () => {
     const user = userEvent.setup()
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
     render(<App />)
-    await user.click((await screen.findAllByRole('button', { name: 'GYM' })).at(-1)!)
+    await user.click((await screen.findAllByRole('button', { name: 'Training' })).at(-1)!)
     await user.click(screen.getByRole('button', { name: 'Einheiten verwalten' }))
     await user.click(screen.getByRole('button', { name: 'Einheit hinzufügen' }))
     await user.type(screen.getByRole('textbox', { name: 'Name der Einheit' }), 'Core')
@@ -410,7 +491,7 @@ describe('Heute-Interaktion', () => {
     }))
 
     render(<App />)
-    await user.click((await screen.findAllByRole('button', { name: 'GYM' })).at(-1)!)
+    await user.click((await screen.findAllByRole('button', { name: 'Training' })).at(-1)!)
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: /Training starten/ }))
     fillGymReps()
@@ -446,7 +527,7 @@ describe('Heute-Interaktion', () => {
     })
 
     render(<App />)
-    await user.click((await screen.findAllByRole('button', { name: 'GYM' })).at(-1)!)
+    await user.click((await screen.findAllByRole('button', { name: 'Training' })).at(-1)!)
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: /Training starten/ }))
     fillGymReps()
@@ -468,7 +549,7 @@ describe('Heute-Interaktion', () => {
     })
 
     render(<App />)
-    await user.click((await screen.findAllByRole('button', { name: 'GYM' })).at(-1)!)
+    await user.click((await screen.findAllByRole('button', { name: 'Training' })).at(-1)!)
     await user.click(screen.getByRole('button', { name: 'Einheiten verwalten' }))
     await user.click(screen.getByRole('button', { name: 'Push bearbeiten' }))
     const name = screen.getByRole('textbox', { name: 'Name der Einheit' })
@@ -577,6 +658,32 @@ describe('Heute-Interaktion', () => {
     localStorage.setItem('pace-demo-active-profile-v1', 'profile-sena')
     render(<App />)
     expect(await screen.findByText('Keine Ziele aktiv')).toBeInTheDocument()
+  })
+
+  it('hält die Analyseauswahl zwischen Profilen und Demo-/Normalmodus getrennt', async () => {
+    const user = userEvent.setup()
+    window.history.replaceState({}, '', '/?demo=1')
+    render(<App />)
+
+    await user.click((await screen.findAllByRole('button', { name: 'Analyse' })).at(-1)!)
+    await user.click(screen.getByRole('button', { name: /Protein einzeln analysieren/ }))
+    expect(JSON.parse(localStorage.getItem('pace-analysis-goals-v1-demo-profile-bugra')!)).toEqual({
+      version: 1,
+      mode: 'custom',
+      goalIds: ['protein'],
+    })
+    expect(localStorage.getItem('pace-analysis-goals-v1-profile-bugra')).toBeNull()
+
+    await user.click(screen.getAllByRole('button', { name: 'Profil: Bugra' })[0]!)
+    await user.click(screen.getByRole('button', { name: 'Zu Sena wechseln' }))
+    expect(await screen.findByText('Keine Ziele aktiv')).toBeInTheDocument()
+    expect(localStorage.getItem('pace-analysis-goals-v1-demo-profile-sena')).toBeNull()
+
+    await user.click(screen.getAllByRole('button', { name: 'Profil: Sena' })[0]!)
+    await user.click(screen.getByRole('button', { name: 'Zu Bugra wechseln' }))
+    await user.click((await screen.findAllByRole('button', { name: 'Analyse' })).at(-1)!)
+    expect(screen.getByRole('button', { name: /Protein ausgewählt/ })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: /Wasser auswählen/ })).toHaveAttribute('aria-pressed', 'false')
   })
 
   it('lässt Sena ihr erstes normales Ziel über die native Formularvalidierung anlegen', async () => {

@@ -82,6 +82,20 @@ describe('Pace API', () => {
     expect((await request(app).get('/api/data?profileId=profile-sena').expect(200)).body.data.gymSessions).toEqual([])
   })
 
+  it('validiert Wochenziele und manuelle Korrekturen serverseitig', async () => {
+    database = new PaceDatabase(':memory:', { now: () => new Date('2026-09-22T10:00:00Z'), timeZone: 'Europe/Berlin' })
+    const app = createApp(database, new GoogleHealthService(database), { now: () => new Date('2026-09-22T10:00:00Z'), timeZone: 'Europe/Berlin' })
+    const definition = { effectiveFrom: '2026-09-21', name: '2× Mobility', targetCount: 2, sourceType: 'manual', color: '#a78bfa', icon: 'calendar', active: true, countingMode: 'unique-days' }
+    const goal = { id: 'weekly-mobility', name: definition.name, targetCount: definition.targetCount, sourceType: definition.sourceType, color: definition.color, icon: definition.icon, active: definition.active, countingMode: definition.countingMode, createdAt: '2026-09-22', startDate: '2026-09-21', definitions: [definition] }
+    await request(app).post('/api/mutations').send({ profileId: 'profile-bugra', mutation: { id: 'weekly-valid', kind: 'weekly-goal.upsert', goal } }).expect(200)
+    await request(app).post('/api/mutations').send({ profileId: 'profile-bugra', mutation: { id: 'weekly-adjust-valid', kind: 'weekly-goal.adjust', adjustment: { goalId: goal.id, date: '2026-09-21', status: 'injured', updatedAt: '2026-09-22T10:00:00Z' } } }).expect(200)
+    await request(app).post('/api/mutations').send({ profileId: 'profile-bugra', mutation: { id: 'weekly-adjust-future', kind: 'weekly-goal.adjust', adjustment: { goalId: goal.id, date: '2026-09-23', status: 'done', updatedAt: '2026-09-22T10:00:00Z' } } }).expect(400)
+
+    const futureDefinition = { ...definition, effectiveFrom: '2026-09-28', name: '3× Mobility', targetCount: 3 }
+    const futureGoal = { ...goal, name: futureDefinition.name, targetCount: futureDefinition.targetCount, definitions: [{ ...definition, effectiveTo: '2026-09-28' }, futureDefinition] }
+    await request(app).post('/api/mutations').send({ profileId: 'profile-bugra', mutation: { id: 'weekly-future-definition', kind: 'weekly-goal.upsert', goal: futureGoal } }).expect(400)
+  })
+
   it('merged kanonische Übungen über die API atomar, profilisoliert und bei Retry nur einmal', async () => {
     database = new PaceDatabase(':memory:')
     const app = createApp(database, new GoogleHealthService(database))
@@ -221,10 +235,10 @@ describe('Pace API', () => {
     }
   })
 
-  it('prüft Health ohne persönliche Daten und meldet Schema 10', async () => {
+  it('prüft Health ohne persönliche Daten und meldet Schema 12', async () => {
     database = new PaceDatabase(':memory:')
     const response = await request(createApp(database, new GoogleHealthService(database))).get('/api/health').expect(200)
-    expect(response.body).toEqual({ status: 'ok', sqliteReady: true, schemaVersion: 10 })
+    expect(response.body).toEqual({ status: 'ok', sqliteReady: true, schemaVersion: 12 })
     expect(JSON.stringify(response.body)).not.toContain('Bugra')
   })
 
@@ -238,9 +252,9 @@ describe('Pace API', () => {
 
   it('liefert bei unerwarteter Schemaversion Health 503', async () => {
     database = new PaceDatabase(':memory:')
-    database.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(11, new Date().toISOString())
+    database.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(13, new Date().toISOString())
     const response = await request(createApp(database, new GoogleHealthService(database))).get('/api/health').expect(503)
-    expect(response.body).toEqual({ status: 'unavailable', sqliteReady: false, schemaVersion: 11 })
+    expect(response.body).toEqual({ status: 'unavailable', sqliteReady: false, schemaVersion: 13 })
   })
 
   it('setzt restriktive Browser-Sicherheitsheader', async () => {
@@ -248,7 +262,15 @@ describe('Pace API', () => {
     const response = await request(createApp(database, new GoogleHealthService(database))).get('/api/health').expect(200)
     expect(response.headers['permissions-policy']).toContain('camera=()')
     expect(response.headers['content-security-policy']).toContain("default-src 'self'")
+    expect(response.headers['content-security-policy']).toContain('blob:')
     expect(response.headers['x-content-type-options']).toBe('nosniff')
+  })
+
+  it('weist ungültige Screenshot-Dateien vor der OCR sicher zurück', async () => {
+    database = new PaceDatabase(':memory:')
+    await request(createApp(database, new GoogleHealthService(database)))
+      .post('/api/runs/screenshot/recognize').set('Origin', 'http://localhost:5173').set('Content-Type', 'application/octet-stream')
+      .send(Buffer.from('kein bild')).expect(400, { error: 'Bitte ein JPG-, PNG- oder HEIC-Bild auswählen.' })
   })
 
   it('verlangt in Produktion bei Schreibzugriffen exakt die konfigurierte Origin', async () => {

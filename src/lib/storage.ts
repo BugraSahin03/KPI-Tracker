@@ -9,8 +9,12 @@ import type {
   GymSession,
   GymExercise,
   GymTemplate,
+  RunningSession,
+  WeeklyGoal,
+  WeeklyGoalAdjustment,
+  WeeklyGoalDefinition,
 } from '../types.js'
-import { isValid, parseISO } from 'date-fns'
+import { getISODay, isValid, parseISO } from 'date-fns'
 import { todayKey } from './date.js'
 
 export const STORAGE_KEY = 'pace-tracker-data'
@@ -61,6 +65,9 @@ export function createInitialData(startDate = todayKey()): AppData {
     gymTemplates: createDefaultGymTemplates(`${startDate}T00:00:00.000Z`),
     gymSessions: [],
     gymExercises: [],
+    runs: [],
+    weeklyGoals: [],
+    weeklyGoalAdjustments: [],
   }
 }
 
@@ -251,6 +258,59 @@ export function isGymExercise(value: unknown): value is GymExercise {
     isTimestamp(value.createdAt) && isTimestamp(value.updatedAt)
 }
 
+export function isRunningSession(value: unknown): value is RunningSession {
+  if (!isRecord(value)) return false
+  const optionalInteger = (item: unknown, min: number, max: number) => item === undefined || (Number.isInteger(item) && Number(item) >= min && Number(item) <= max)
+  const optionalNumber = (item: unknown, min: number, max: number) => item === undefined || (typeof item === 'number' && Number.isFinite(item) && item >= min && item <= max)
+  const expectedPace = typeof value.durationSeconds === 'number' && typeof value.distanceKm === 'number' && value.distanceKm > 0
+    ? value.durationSeconds / value.distanceKm : Number.NaN
+  return isIdentifier(value.id) && (value.environment === 'indoor' || value.environment === 'outdoor') && isDateKey(value.date) &&
+    (value.startTime === undefined || (typeof value.startTime === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value.startTime))) &&
+    Number.isInteger(value.durationSeconds) && Number(value.durationSeconds) >= 60 && Number(value.durationSeconds) <= 24 * 60 * 60 &&
+    typeof value.distanceKm === 'number' && Number.isFinite(value.distanceKm) && value.distanceKm >= 0.05 && value.distanceKm <= 500 &&
+    Number.isInteger(value.averagePaceSecondsPerKm) && Number(value.averagePaceSecondsPerKm) >= 60 && Number(value.averagePaceSecondsPerKm) <= 3600 &&
+    Math.abs(Number(value.averagePaceSecondsPerKm) - expectedPace) <= Math.max(5, expectedPace * 0.03) &&
+    optionalInteger(value.averageHeartRateBpm, 30, 250) && optionalInteger(value.effort, 1, 10) &&
+    optionalInteger(value.activeCalories, 0, 10000) && optionalInteger(value.totalCalories, 0, 15000) &&
+    optionalNumber(value.elevationGainM, 0, 20000) && optionalInteger(value.averagePowerWatts, 0, 3000) && optionalInteger(value.averageCadenceSpm, 0, 300) &&
+    (value.source === 'screenshot' || value.source === 'manual' || value.source === 'shortcut') &&
+    typeof value.fingerprint === 'string' && /^[a-f0-9]{64}$/.test(value.fingerprint) && isTimestamp(value.createdAt)
+}
+
+function isWeeklyGoalDefinition(value: unknown): value is WeeklyGoalDefinition {
+  if (!isRecord(value)) return false
+  const templateIds = value.gymTemplateIds
+  const templateNames = value.gymTemplateNames
+  return isDateKey(value.effectiveFrom) && getISODay(parseISO(String(value.effectiveFrom))) === 1 && (value.effectiveTo === undefined || (isDateKey(value.effectiveTo) && value.effectiveFrom < value.effectiveTo)) &&
+    typeof value.name === 'string' && value.name.trim().length > 0 && value.name.length <= 50 &&
+    Number.isInteger(value.targetCount) && Number(value.targetCount) >= 1 && Number(value.targetCount) <= 7 &&
+    ['gym', 'run', 'manual'].includes(String(value.sourceType)) &&
+    (templateIds === undefined || (Array.isArray(templateIds) && templateIds.length <= 50 && templateIds.every(isIdentifier) && new Set(templateIds).size === templateIds.length)) &&
+    (templateNames === undefined || (Array.isArray(templateNames) && templateNames.length <= 50 && templateNames.every((name) => typeof name === 'string' && name.trim().length > 0 && name.length <= 80) && new Set(templateNames).size === templateNames.length)) &&
+    (value.runEnvironment === undefined || ['any', 'indoor', 'outdoor'].includes(String(value.runEnvironment))) &&
+    typeof value.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(value.color) &&
+    ['gym', 'run', 'calendar', 'custom'].includes(String(value.icon)) && typeof value.active === 'boolean' && value.countingMode === 'unique-days' &&
+    (value.sourceType === 'gym' ? value.runEnvironment === undefined : true) &&
+    (value.sourceType === 'run' ? templateIds === undefined && templateNames === undefined : true) &&
+    (value.sourceType === 'manual' ? templateIds === undefined && templateNames === undefined && value.runEnvironment === undefined : true)
+}
+
+export function isWeeklyGoal(value: unknown): value is WeeklyGoal {
+  if (!isRecord(value) || !Array.isArray(value.definitions) || value.definitions.length === 0 || !value.definitions.every(isWeeklyGoalDefinition)) return false
+  const definitions = value.definitions as WeeklyGoalDefinition[]
+  const ordered = definitions.every((item, index) => index === 0 || definitions[index - 1]!.effectiveTo === item.effectiveFrom)
+  const current = definitions.at(-1)!
+  return isIdentifier(value.id) && isDateKey(value.createdAt) && isDateKey(value.startDate) && value.startDate === definitions[0]!.effectiveFrom && ordered && current.effectiveTo === undefined &&
+    value.name === current.name && value.targetCount === current.targetCount && value.sourceType === current.sourceType &&
+    JSON.stringify(value.gymTemplateIds) === JSON.stringify(current.gymTemplateIds) && value.runEnvironment === current.runEnvironment &&
+    value.color === current.color && value.icon === current.icon && value.active === current.active && value.countingMode === 'unique-days'
+}
+
+export function isWeeklyGoalAdjustment(value: unknown): value is WeeklyGoalAdjustment {
+  return isRecord(value) && isIdentifier(value.goalId) && isDateKey(value.date) &&
+    ['done', 'sick', 'injured'].includes(String(value.status)) && isTimestamp(value.updatedAt)
+}
+
 export function isAppData(value: unknown): value is AppData {
   if (!isRecord(value)) return false
   if (value.version === 1) return migrateV1(value) !== null
@@ -262,7 +322,10 @@ export function isAppData(value: unknown): value is AppData {
     Array.isArray(value.bodyMetrics) && value.bodyMetrics.every(isBodyMetric) &&
     Array.isArray(value.gymTemplates) && value.gymTemplates.every(isGymTemplate) &&
     Array.isArray(value.gymSessions) && value.gymSessions.every(isGymSession) &&
-    (value.gymExercises === undefined || (Array.isArray(value.gymExercises) && value.gymExercises.every(isGymExercise)))
+    (value.gymExercises === undefined || (Array.isArray(value.gymExercises) && value.gymExercises.every(isGymExercise))) &&
+    (value.runs === undefined || (Array.isArray(value.runs) && value.runs.every(isRunningSession)))
+    && (value.weeklyGoals === undefined || (Array.isArray(value.weeklyGoals) && value.weeklyGoals.every(isWeeklyGoal)))
+    && (value.weeklyGoalAdjustments === undefined || (Array.isArray(value.weeklyGoalAdjustments) && value.weeklyGoalAdjustments.every(isWeeklyGoalAdjustment)))
   )) return false
   const goals = value.goals as Goal[]
   const entries = value.entries as DailyEntry[]
@@ -274,13 +337,20 @@ export function isAppData(value: unknown): value is AppData {
   const templates = value.gymTemplates as GymTemplate[]
   const sessions = value.gymSessions as GymSession[]
   const gymExercises = (value.gymExercises ?? []) as GymExercise[]
+  const runs = (value.runs ?? []) as RunningSession[]
+  const weeklyGoals = (value.weeklyGoals ?? []) as WeeklyGoal[]
+  const weeklyAdjustments = (value.weeklyGoalAdjustments ?? []) as WeeklyGoalAdjustment[]
   const exerciseIds = new Set(gymExercises.map((exercise) => exercise.id))
   return goalIds.size === goals.length && metricIds.size === metrics.length &&
     new Set(externalIds).size === externalIds.length && entryKeys.size === entries.length &&
     entries.every((entry) => goalIds.has(entry.goalId)) &&
     new Set(templates.map((template) => template.id)).size === templates.length &&
     new Set(sessions.map((session) => session.id)).size === sessions.length &&
-    exerciseIds.size === gymExercises.length &&
+    exerciseIds.size === gymExercises.length && new Set(runs.map((run) => run.id)).size === runs.length &&
+    new Set(runs.map((run) => run.fingerprint)).size === runs.length &&
+    new Set(weeklyGoals.map((goal) => goal.id)).size === weeklyGoals.length &&
+    new Set(weeklyAdjustments.map((item) => `${item.goalId}\0${item.date}`)).size === weeklyAdjustments.length &&
+    weeklyAdjustments.every((item) => weeklyGoals.some((goal) => goal.id === item.goalId)) &&
     (gymExercises.length === 0 || templates.every((template) => template.exercises.every((exercise) => exercise.exerciseId === undefined || exerciseIds.has(exercise.exerciseId))) &&
       sessions.every((session) => session.exercises.every((exercise) => exercise.exerciseId === undefined || exerciseIds.has(exercise.exerciseId))))
 }

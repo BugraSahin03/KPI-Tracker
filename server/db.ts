@@ -3,8 +3,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
-import { DEFAULT_PROFILE_ID, type AppData, type BodyMetric, type DataMutation, type GymSession, type GymTemplate, type Profile, type ProfileId } from '../src/types.js'
+import { DEFAULT_PROFILE_ID, type AppData, type BodyMetric, type DataMutation, type GymSession, type GymTemplate, type Profile, type ProfileId, type RunningSession, type WeeklyGoal, type WeeklyGoalAdjustment } from '../src/types.js'
 import { legacyGymSetId } from '../src/lib/storage.js'
+import { weeklyGoalDefinitionForDate } from '../src/lib/weeklyGoals.js'
 import { config } from './config.js'
 import { dateKeyInTimeZone } from './time.js'
 
@@ -60,6 +61,9 @@ export class PaceDatabase {
         id: `gym-template-${name.toLowerCase()}`, name, createdAt: seededAt, updatedAt: seededAt, exercises: [],
       })),
       gymSessions: [],
+      runs: [],
+      weeklyGoals: [],
+      weeklyGoalAdjustments: [],
     }
     this.replaceData(DEFAULT_PROFILE_ID, data, 0, true)
   }
@@ -98,14 +102,17 @@ export class PaceDatabase {
     const gymExercises = (this.db.prepare('SELECT id,name,created_at,updated_at FROM gym_exercises WHERE profile_id=? ORDER BY name COLLATE NOCASE,id').all(profileId) as Row[]).map((row) => ({
       id: String(row.id), name: String(row.name), createdAt: normalizeSqlTimestamp(String(row.created_at)), updatedAt: normalizeSqlTimestamp(String(row.updated_at)),
     }))
-    return { version: 3, goals, entries, bodyMetrics, gymTemplates, gymSessions, gymExercises }
+    const runs = (this.db.prepare('SELECT * FROM running_sessions WHERE profile_id=? ORDER BY date DESC,start_time DESC,created_at DESC').all(profileId) as Row[]).map(rowToRunningSession)
+    const weeklyGoals = (this.db.prepare('SELECT * FROM weekly_goals WHERE profile_id=? ORDER BY rowid').all(profileId) as Row[]).map(rowToWeeklyGoal)
+    const weeklyGoalAdjustments = (this.db.prepare("SELECT * FROM weekly_goal_adjustments WHERE profile_id=? AND status<>'open' ORDER BY date,goal_id").all(profileId) as Row[]).map(rowToWeeklyGoalAdjustment)
+    return { version: 3, goals, entries, bodyMetrics, gymTemplates, gymSessions, gymExercises, runs, weeklyGoals, weeklyGoalAdjustments }
   }
 
   private hasExactSeed() {
     const state = this.db.prepare('SELECT revision, seed_pristine FROM app_state WHERE singleton=1').get() as Row | undefined
     if (!state || Number(state.revision) !== 0 || Number(state.seed_pristine) !== 1) return false
     const data = this.getData(DEFAULT_PROFILE_ID)
-    if (data.entries.length || data.bodyMetrics.length || data.gymSessions.length || data.goals.length !== 2 || data.gymTemplates.length !== 3) return false
+    if (data.entries.length || data.bodyMetrics.length || data.gymSessions.length || (data.runs?.length ?? 0) || (data.weeklyGoals?.length ?? 0) || data.goals.length !== 2 || data.gymTemplates.length !== 3) return false
     const expected = new Map([
       ['protein', { name: 'Protein', unit: 'g', target: 120, icon: 'protein', color: '#c6ff3d' }],
       ['water', { name: 'Wasser', unit: 'L', target: 2, icon: 'water', color: '#4dc5ff' }],
@@ -162,6 +169,9 @@ export class PaceDatabase {
       this.db.prepare('DELETE FROM gym_templates WHERE profile_id=?').run(profileId)
       this.db.prepare('DELETE FROM gym_exercise_aliases WHERE profile_id=?').run(profileId)
       this.db.prepare('DELETE FROM gym_exercises WHERE profile_id=?').run(profileId)
+      this.db.prepare('DELETE FROM running_sessions WHERE profile_id=?').run(profileId)
+      this.db.prepare('DELETE FROM weekly_goal_adjustments WHERE profile_id=?').run(profileId)
+      this.db.prepare('DELETE FROM weekly_goals WHERE profile_id=?').run(profileId)
       const insertGoal = this.db.prepare(`INSERT INTO goals
         (profile_id,id,name,unit,target,icon,color,active,created_at,activity_periods_json) VALUES (?,?,?,?,?,?,?,?,?,?)`)
       for (const goal of data.goals) insertGoal.run(profileId, goal.id, goal.name, goal.unit, goal.target, goal.icon, goal.color, goal.active ? 1 : 0, goal.createdAt, JSON.stringify(goal.activityPeriods))
@@ -189,6 +199,10 @@ export class PaceDatabase {
         }
       }
       for (const session of data.gymSessions) this.insertGymSession(profileId, session)
+      for (const run of data.runs ?? []) this.insertRunningSession(profileId, run)
+      for (const goal of data.weeklyGoals ?? []) this.upsertWeeklyGoal(profileId, goal)
+      const insertWeeklyAdjustment = this.db.prepare('INSERT INTO weekly_goal_adjustments(profile_id,goal_id,date,status,updated_at) VALUES (?,?,?,?,?)')
+      for (const adjustment of data.weeklyGoalAdjustments ?? []) insertWeeklyAdjustment.run(profileId, adjustment.goalId, adjustment.date, adjustment.status, adjustment.updatedAt)
       const restorePoint = this.db.prepare('INSERT OR IGNORE INTO integration_data_points(provider,external_id,profile_id,body_metric_id,imported_at) VALUES (?,?,?,?,?)')
       const metricIds = new Set(data.bodyMetrics.map((metric) => metric.id))
       for (const link of pointLinks) {
@@ -239,12 +253,30 @@ export class PaceDatabase {
       } else if (mutation.kind === 'gym.template.upsert') {
         this.upsertGymTemplate(profileId, mutation.template)
       } else if (mutation.kind === 'gym.template.delete') {
-        this.db.prepare('UPDATE gym_sessions SET template_id=NULL WHERE profile_id=? AND template_id=?').run(profileId, mutation.templateId)
+        // Completed sessions retain their immutable source id. In the
+        // profile-aware schema this snapshot is intentionally not a foreign
+        // key to the editable template, so plan deletion cannot rewrite
+        // historical weekly-goal results.
         this.db.prepare('DELETE FROM gym_templates WHERE profile_id=? AND id=?').run(profileId, mutation.templateId)
       } else if (mutation.kind === 'gym.session.complete') {
         this.insertGymSession(profileId, mutation.session)
       } else if (mutation.kind === 'gym.session.delete') {
         this.db.prepare('DELETE FROM gym_sessions WHERE profile_id=? AND id=?').run(profileId, mutation.sessionId)
+      } else if (mutation.kind === 'run.create') {
+        this.insertRunningSession(profileId, mutation.run)
+      } else if (mutation.kind === 'run.delete') {
+        this.db.prepare('DELETE FROM running_sessions WHERE profile_id=? AND id=?').run(profileId, mutation.runId)
+      } else if (mutation.kind === 'weekly-goal.upsert') {
+        this.upsertWeeklyGoal(profileId, mutation.goal)
+      } else if (mutation.kind === 'weekly-goal.delete') {
+        this.db.prepare('DELETE FROM weekly_goals WHERE profile_id=? AND id=?').run(profileId, mutation.goalId)
+      } else if (mutation.kind === 'weekly-goal.adjust') {
+        const weeklyGoalRow = this.db.prepare('SELECT * FROM weekly_goals WHERE profile_id=? AND id=?').get(profileId, mutation.adjustment.goalId) as Row | undefined
+        if (!weeklyGoalRow) throw integrityError()
+        if (mutation.adjustment.status !== 'open' && !weeklyGoalDefinitionForDate(rowToWeeklyGoal(weeklyGoalRow), mutation.adjustment.date)?.active) throw integrityError()
+        this.db.prepare(`INSERT INTO weekly_goal_adjustments(profile_id,goal_id,date,status,updated_at) VALUES (?,?,?,?,?)
+          ON CONFLICT(profile_id,goal_id,date) DO UPDATE SET status=excluded.status,updated_at=excluded.updated_at
+          WHERE julianday(excluded.updated_at) >= julianday(weekly_goal_adjustments.updated_at)`).run(profileId, mutation.adjustment.goalId, mutation.adjustment.date, mutation.adjustment.status, mutation.adjustment.updatedAt)
       } else if (mutation.kind === 'gym.exercise.merge') {
         this.mergeGymExercises(profileId, mutation.sourceExerciseId, mutation.targetExerciseId, mutation.expectedSourceName, mutation.expectedTargetName)
       } else if (mutation.kind === 'gym.exercise.rename') {
@@ -271,6 +303,18 @@ export class PaceDatabase {
       const canonicalName = this.gymExerciseName(profileId, exerciseId)
       insert.run(profileId, exercise.id, template.id, canonicalName, exercise.sets, exercise.targetWeightKg ?? null, exercise.targetReps, exercise.targetRepsMax ?? null, exercise.position, exerciseId)
     }
+  }
+
+  private upsertWeeklyGoal(profileId: string, goal: WeeklyGoal) {
+    const existing = this.db.prepare('SELECT created_at,start_date FROM weekly_goals WHERE profile_id=? AND id=?').get(profileId, goal.id) as Row | undefined
+    if (existing && (String(existing.created_at) !== goal.createdAt || String(existing.start_date) !== goal.startDate)) throw integrityError()
+    this.db.prepare(`INSERT INTO weekly_goals(profile_id,id,name,target_count,source_type,gym_template_ids_json,run_environment,color,icon,created_at,start_date,active,counting_mode,definitions_json)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,id) DO UPDATE SET name=excluded.name,target_count=excluded.target_count,
+      source_type=excluded.source_type,gym_template_ids_json=excluded.gym_template_ids_json,run_environment=excluded.run_environment,color=excluded.color,
+      icon=excluded.icon,active=excluded.active,counting_mode=excluded.counting_mode,definitions_json=excluded.definitions_json`).run(
+      profileId, goal.id, goal.name, goal.targetCount, goal.sourceType, goal.gymTemplateIds ? JSON.stringify(goal.gymTemplateIds) : null,
+      goal.runEnvironment ?? null, goal.color, goal.icon, goal.createdAt, goal.startDate, goal.active ? 1 : 0, goal.countingMode, JSON.stringify(goal.definitions),
+    )
   }
 
   private ensureGymExercise(profileId: string, exerciseId: string, name: string, createdAt: string, updatedAt: string) {
@@ -340,7 +384,7 @@ export class PaceDatabase {
   private insertGymSession(profileId: string, session: GymSession) {
     this.db.prepare(`INSERT INTO gym_sessions(profile_id,id,template_id,template_name,date,started_at,completed_at)
       VALUES (?,?,?,?,?,?,?)`).run(
-      profileId, session.id, session.templateId && this.db.prepare('SELECT 1 FROM gym_templates WHERE profile_id=? AND id=?').get(profileId, session.templateId) ? session.templateId : null,
+      profileId, session.id, session.templateId ?? null,
       session.templateName, session.date, session.startedAt, session.completedAt,
     )
     const insert = this.db.prepare(`INSERT INTO gym_session_exercises
@@ -363,6 +407,23 @@ export class PaceDatabase {
       }))
       for (const set of performedSets) insertSet.run(profileId, set.id, exercise.id, set.setNumber, set.weightKg ?? null, set.reps)
     }
+  }
+
+  private insertRunningSession(profileId: string, run: RunningSession) {
+    const existing = this.db.prepare('SELECT id FROM running_sessions WHERE profile_id=? AND fingerprint=?').get(profileId, run.fingerprint) as Row | undefined
+    if (existing) {
+      const error = new Error('Dieser Lauf wurde bereits gespeichert.')
+      Object.assign(error, { code: 'RUN_DUPLICATE' })
+      throw error
+    }
+    this.db.prepare(`INSERT INTO running_sessions
+      (profile_id,id,environment,date,start_time,duration_seconds,distance_km,average_pace_seconds_per_km,average_heart_rate_bpm,effort,active_calories,total_calories,elevation_gain_m,average_power_watts,average_cadence_spm,source,fingerprint,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      profileId, run.id, run.environment, run.date, run.startTime ?? null, run.durationSeconds, run.distanceKm,
+      run.averagePaceSecondsPerKm, run.averageHeartRateBpm ?? null, run.effort ?? null, run.activeCalories ?? null,
+      run.totalCalories ?? null, run.elevationGainM ?? null, run.averagePowerWatts ?? null, run.averageCadenceSpm ?? null,
+      run.source, run.fingerprint, run.createdAt,
+    )
   }
 
   upsertGooglePoint(point: GoogleMetricPoint) {
@@ -475,6 +536,37 @@ function rowToBodyMetric(row: Row): BodyMetric {
   }
 }
 
+function rowToRunningSession(row: Row): RunningSession {
+  return {
+    id: String(row.id), environment: String(row.environment) as RunningSession['environment'], date: String(row.date),
+    ...(row.start_time == null ? {} : { startTime: String(row.start_time) }),
+    durationSeconds: Number(row.duration_seconds), distanceKm: Number(row.distance_km), averagePaceSecondsPerKm: Number(row.average_pace_seconds_per_km),
+    ...(row.average_heart_rate_bpm == null ? {} : { averageHeartRateBpm: Number(row.average_heart_rate_bpm) }),
+    ...(row.effort == null ? {} : { effort: Number(row.effort) }),
+    ...(row.active_calories == null ? {} : { activeCalories: Number(row.active_calories) }),
+    ...(row.total_calories == null ? {} : { totalCalories: Number(row.total_calories) }),
+    ...(row.elevation_gain_m == null ? {} : { elevationGainM: Number(row.elevation_gain_m) }),
+    ...(row.average_power_watts == null ? {} : { averagePowerWatts: Number(row.average_power_watts) }),
+    ...(row.average_cadence_spm == null ? {} : { averageCadenceSpm: Number(row.average_cadence_spm) }),
+    source: String(row.source) as RunningSession['source'], fingerprint: String(row.fingerprint), createdAt: normalizeSqlTimestamp(String(row.created_at)),
+  }
+}
+
+function rowToWeeklyGoal(row: Row): WeeklyGoal {
+  return {
+    id: String(row.id), name: String(row.name), targetCount: Number(row.target_count),
+    sourceType: String(row.source_type) as WeeklyGoal['sourceType'],
+    ...(row.gym_template_ids_json == null ? {} : { gymTemplateIds: JSON.parse(String(row.gym_template_ids_json)) as string[] }),
+    ...(row.run_environment == null ? {} : { runEnvironment: String(row.run_environment) as WeeklyGoal['runEnvironment'] }),
+    color: String(row.color), icon: String(row.icon) as WeeklyGoal['icon'], createdAt: String(row.created_at), startDate: String(row.start_date),
+    active: Boolean(row.active), countingMode: 'unique-days', definitions: JSON.parse(String(row.definitions_json)),
+  }
+}
+
+function rowToWeeklyGoalAdjustment(row: Row): WeeklyGoalAdjustment {
+  return { goalId: String(row.goal_id), date: String(row.date), status: String(row.status) as WeeklyGoalAdjustment['status'], updatedAt: normalizeSqlTimestamp(String(row.updated_at)) }
+}
+
 function rowToGymTemplate(db: Database.Database, row: Row, profileId: string): GymTemplate {
   const exercises = db.prepare('SELECT * FROM gym_template_exercises WHERE profile_id=? AND template_id=? ORDER BY position').all(profileId, row.id) as Row[]
   return {
@@ -547,4 +639,4 @@ function canonicalExerciseName(db: Database.Database, exerciseId: unknown, fallb
   return row ? String(row.name) : String(fallback)
 }
 
-export const EXPECTED_SCHEMA_VERSION = 10
+export const EXPECTED_SCHEMA_VERSION = 12

@@ -21,13 +21,16 @@
     "backup": "node scripts/backup/create-backup.mjs"
   },
   "dependencies": {
+    "@tesseract.js-data/deu": "^1.0.0",
     "better-sqlite3": "^13.0.2",
     "date-fns": "^4.4.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "lucide-react": "^1.28.0",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "sharp": "^0.35.4",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -47,7 +50,6 @@
     "eslint-plugin-react-refresh": "^0.5.3",
     "globals": "^17.7.0",
     "jsdom": "^30.0.1",
-    "sharp": "^0.35.3",
     "supertest": "^7.2.2",
     "tsx": "^4.23.4",
     "typescript": "~6.0.2",

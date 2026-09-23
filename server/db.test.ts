@@ -17,7 +17,7 @@ describe('PaceDatabase', () => {
       { id: 'profile-bugra', name: 'Bugra' }, { id: 'profile-sena', name: 'Sena' },
     ])
     expect(database.getData('profile-bugra').goals).toHaveLength(2)
-    expect(database.getData('profile-sena')).toEqual({ version: 3, goals: [], entries: [], bodyMetrics: [], gymTemplates: [], gymSessions: [], gymExercises: [] })
+    expect(database.getData('profile-sena')).toEqual({ version: 3, goals: [], entries: [], bodyMetrics: [], gymTemplates: [], gymSessions: [], gymExercises: [], runs: [], weeklyGoals: [], weeklyGoalAdjustments: [] })
   })
 
   it('seedet den verbindlichen Berliner Tag statt des UTC-Hosttags', () => {
@@ -38,21 +38,59 @@ describe('PaceDatabase', () => {
     expect(() => database!.applyMutation('profile-sena', { id: 'orphan-sena', kind: 'entry.set', entry: { goalId: goal.id, date: '2026-08-01', status: 'done', updatedAt: '2026-08-01T12:00:00Z' } })).toThrow(/Datenintegrität/)
   })
 
-  it('bewahrt Session-Snapshots bei profilbezogener Vorlagenlöschung', () => {
+  it('bewahrt Session-Snapshots samt Quell-ID bei profilbezogener Vorlagenlöschung', () => {
     database = new PaceDatabase(':memory:')
     const template = database.getData('profile-bugra').gymTemplates[0]!
     database.applyMutation('profile-bugra', { id: 'template-exercise', kind: 'gym.template.upsert', template: { ...template, exercises: [{ id: 'bench', name: 'Bankdrücken', sets: 3, targetReps: 8, position: 0 }] } })
     database.applyMutation('profile-bugra', { id: 'session', kind: 'gym.session.complete', session: { id: 'session', templateId: template.id, templateName: template.name, date: '2026-08-01', startedAt: '2026-08-01T10:00:00Z', completedAt: '2026-08-01T11:00:00Z', exercises: [{ id: 'session-bench', templateExerciseId: 'bench', name: 'Bankdrücken', sets: 3, reps: 8, position: 0 }] } })
+    database.applyMutation('profile-bugra', { id: 'rename-template', kind: 'gym.template.upsert', template: { ...template, name: 'Push neu', exercises: [{ id: 'bench', name: 'Bankdrücken', sets: 3, targetReps: 8, position: 0 }] } })
+    database.applyMutation('profile-bugra', { id: 'session-after-rename', kind: 'gym.session.complete', session: { id: 'session-after-rename', templateId: template.id, templateName: 'Push neu', date: '2026-08-02', startedAt: '2026-08-02T10:00:00Z', completedAt: '2026-08-02T11:00:00Z', exercises: [{ id: 'session-after-rename-bench', templateExerciseId: 'bench', name: 'Bankdrücken', sets: 3, reps: 8, position: 0 }] } })
     database.applyMutation('profile-bugra', { id: 'delete-template', kind: 'gym.template.delete', templateId: template.id })
-    const stored = database.getData('profile-bugra').gymSessions[0]!
-    expect(stored).toMatchObject({ templateName: template.name })
-    expect(stored).not.toHaveProperty('templateId')
+    database.applyMutation('profile-bugra', { id: 'delayed-session-after-delete', kind: 'gym.session.complete', session: { id: 'delayed-session-after-delete', templateId: template.id, templateName: 'Push neu', date: '2026-08-03', startedAt: '2026-08-03T10:00:00Z', completedAt: '2026-08-03T11:00:00Z', exercises: [{ id: 'delayed-session-bench', name: 'Bankdrücken', sets: 3, reps: 8, position: 0 }] } })
+    const stored = database.getData('profile-bugra').gymSessions
+    expect(stored.map((session) => session.templateName)).toEqual(['Push neu', 'Push neu', template.name])
+    expect(stored.every((session) => session.templateId === template.id)).toBe(true)
   })
   it('legt Push, Pull und Beine exakt einmal als leere Startvorlagen an', () => {
     database = new PaceDatabase(':memory:')
     expect(database.getData().gymTemplates.map((template) => [template.name, template.exercises.length])).toEqual([
       ['Push', 0], ['Pull', 0], ['Beine', 0],
     ])
+  })
+
+  it('speichert Läufe profilgetrennt und verhindert einen erneuten Screenshot-Import', () => {
+    database = new PaceDatabase(':memory:')
+    const run = {
+      id: 'run-one', environment: 'outdoor' as const, date: '2026-09-13', startTime: '14:36', durationSeconds: 2410,
+      distanceKm: 5.27, averagePaceSecondsPerKm: 457, averageHeartRateBpm: 161, effort: 6,
+      activeCalories: 445, totalCalories: 514, elevationGainM: 2, averagePowerWatts: 180, averageCadenceSpm: 142,
+      source: 'screenshot' as const, fingerprint: 'a'.repeat(64), createdAt: '2026-09-14T12:00:00Z',
+    }
+    expect(database.applyMutation('profile-bugra', { id: 'create-run', kind: 'run.create', run }).applied).toBe(true)
+    expect(database.getData('profile-bugra').runs).toEqual([run])
+    expect(database.getData('profile-sena').runs).toEqual([])
+    expect(() => database!.applyMutation('profile-bugra', { id: 'duplicate-run', kind: 'run.create', run: { ...run, id: 'run-two' } })).toThrow(/bereits gespeichert/)
+    expect(database.applyMutation('profile-bugra', { id: 'delete-run', kind: 'run.delete', runId: run.id }).applied).toBe(true)
+    expect(database.getData('profile-bugra').runs).toEqual([])
+    expect(database.getData('profile-sena').runs).toEqual([])
+  })
+
+  it('speichert Wochenziele profilgetrennt und lässt veraltete Tageskorrekturen nicht gewinnen', () => {
+    database = new PaceDatabase(':memory:')
+    const definition = { effectiveFrom: '2026-09-21', name: '2× Laufen', targetCount: 2, sourceType: 'run' as const, runEnvironment: 'any' as const, color: '#4dc5ff', icon: 'run' as const, active: true, countingMode: 'unique-days' as const }
+    const goal = { id: 'weekly-run', name: definition.name, targetCount: definition.targetCount, sourceType: definition.sourceType, runEnvironment: definition.runEnvironment, color: definition.color, icon: definition.icon, active: definition.active, countingMode: definition.countingMode, createdAt: '2026-09-22', startDate: definition.effectiveFrom, definitions: [definition] }
+    database.applyMutation('profile-bugra', { id: 'weekly-create', kind: 'weekly-goal.upsert', goal })
+    database.applyMutation('profile-bugra', { id: 'weekly-new', kind: 'weekly-goal.adjust', adjustment: { goalId: goal.id, date: '2026-09-21', status: 'done', updatedAt: '2026-09-22T12:00:00Z' } })
+    database.applyMutation('profile-bugra', { id: 'weekly-stale', kind: 'weekly-goal.adjust', adjustment: { goalId: goal.id, date: '2026-09-21', status: 'sick', updatedAt: '2026-09-22T11:00:00Z' } })
+    database.applyMutation('profile-bugra', { id: 'weekly-stale-open', kind: 'weekly-goal.adjust', adjustment: { goalId: goal.id, date: '2026-09-21', status: 'open', updatedAt: '2026-09-22T11:30:00Z' } })
+    expect(database.getData('profile-bugra').weeklyGoals).toEqual([goal])
+    expect(database.getData('profile-bugra').weeklyGoalAdjustments).toEqual([expect.objectContaining({ status: 'done' })])
+    database.applyMutation('profile-bugra', { id: 'weekly-new-open', kind: 'weekly-goal.adjust', adjustment: { goalId: goal.id, date: '2026-09-21', status: 'open', updatedAt: '2026-09-22T13:00:00Z' } })
+    database.applyMutation('profile-bugra', { id: 'weekly-resurrect-stale', kind: 'weekly-goal.adjust', adjustment: { goalId: goal.id, date: '2026-09-21', status: 'injured', updatedAt: '2026-09-22T12:30:00Z' } })
+    expect(database.getData('profile-bugra').weeklyGoalAdjustments).toEqual([])
+    expect(database.getData('profile-sena').weeklyGoals).toEqual([])
+    expect(() => database!.applyMutation('profile-bugra', { id: 'weekly-immutable', kind: 'weekly-goal.upsert', goal: { ...goal, startDate: '2026-09-14' } })).toThrow(/Datenintegrität/)
+    expect(() => database!.applyMutation('profile-bugra', { id: 'weekly-prestart', kind: 'weekly-goal.adjust', adjustment: { goalId: goal.id, date: '2026-09-14', status: 'done', updatedAt: '2026-09-22T13:00:00Z' } })).toThrow(/Datenintegrität/)
   })
 
   it('verwaltet Vorlagen und hält abgeschlossene Sessions als stabilen Snapshot', () => {
@@ -121,7 +159,7 @@ describe('PaceDatabase', () => {
         .run('profile-bugra', longExerciseId, 'legacy-session', longExerciseId, 'Deadlift', 3, 100, 20, 0)
       database.close()
       database = new PaceDatabase(filename)
-      expect(database.health()).toEqual({ sqliteReady: true, schemaVersion: 10 })
+      expect(database.health()).toEqual({ sqliteReady: true, schemaVersion: 12 })
       const migratedSets = database.getData().gymSessions[0]?.exercises[0]?.performedSets
       expect(migratedSets).toEqual([
         expect.objectContaining({ setNumber: 1, weightKg: 100, reps: 20 }),
@@ -160,7 +198,7 @@ describe('PaceDatabase', () => {
       legacy.close()
 
       database = new PaceDatabase(filename)
-      expect(database.health()).toEqual({ sqliteReady: true, schemaVersion: 10 })
+      expect(database.health()).toEqual({ sqliteReady: true, schemaVersion: 12 })
       expect(database.getData().gymTemplates[0]?.exercises[0]).toEqual(expect.objectContaining({ targetReps: 8 }))
       expect(database.getData().gymTemplates[0]?.exercises[0]).not.toHaveProperty('targetRepsMax')
       expect(database.getData().gymSessions[0]?.exercises[0]).not.toHaveProperty('increaseNextTime')
@@ -252,7 +290,7 @@ describe('PaceDatabase', () => {
           CREATE INDEX gym_exercise_aliases_target_idx ON gym_exercise_aliases(profile_id,target_id);`)
         legacy.close()
         database = new PaceDatabase(filename)
-        expect(database.health()).toEqual({ sqliteReady: true, schemaVersion: 10 })
+        expect(database.health()).toEqual({ sqliteReady: true, schemaVersion: 12 })
         expect(database.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='gym_exercise_aliases'").get()).toBeTruthy()
         database.close()
         database = undefined
@@ -378,9 +416,16 @@ describe('PaceDatabase', () => {
     database = new PaceDatabase(':memory:')
     const data = createInitialData('2026-08-01')
     data.entries.push({ goalId: 'protein', date: '2026-08-01', status: 'done', updatedAt: new Date().toISOString() })
+    data.runs!.push({
+      id: 'replace-run', environment: 'outdoor', date: '2026-08-01', startTime: '08:30', durationSeconds: 1800,
+      distanceKm: 5, averagePaceSecondsPerKm: 360, source: 'screenshot', fingerprint: 'b'.repeat(64), createdAt: '2026-08-01T09:00:00Z',
+    })
     expect(database.replaceData(data, 0)).toBe(1)
     expect(database.getData().entries).toEqual(data.entries)
+    expect(database.getData().runs).toEqual(data.runs)
     expect(() => database!.replaceData(data, 0)).toThrow(/zwischenzeitlich/)
+    expect(database.replaceData(createInitialData('2026-08-01'), 1)).toBe(2)
+    expect(database.getData().runs).toEqual([])
   })
 
   it('dedupliziert Google-Datenpunkte und führt Gewicht und Fett zeitnah zusammen', () => {
@@ -456,8 +501,8 @@ describe('PaceDatabase', () => {
 
   it('meldet bei einer unerwarteten Schemaversion nicht ready', () => {
     database = new PaceDatabase(':memory:')
-    database.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(11, new Date().toISOString())
-    expect(database.health()).toEqual({ sqliteReady: false, schemaVersion: 11 })
+    database.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(13, new Date().toISOString())
+    expect(database.health()).toEqual({ sqliteReady: false, schemaVersion: 13 })
   })
 
   it('verwaltet OAuth-States parallel und verbraucht jeden nur einmal', () => {

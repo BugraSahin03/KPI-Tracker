@@ -4,10 +4,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useState } from 'react'
 import GymView from './GymView'
 import './App.css'
-import { todayKey } from './lib/date'
+import { formatShortDate, historyDateGroup, todayKey } from './lib/date'
 import { createDemoData } from './lib/demo'
 import { createInitialData, legacyGymSetId } from './lib/storage'
-import type { AppData, GymSession } from './types'
+import type { AppData, GymSession, RunningSession } from './types'
 
 function Harness({ initial }: { initial: AppData }) {
   const [data, setData] = useState(initial)
@@ -25,6 +25,16 @@ function session(id: string, date: string, name = 'Push'): GymSession {
     id, templateId: 'push', templateName: name, date,
     startedAt: `${date}T17:00:00.000Z`, completedAt: `${date}T18:00:00.000Z`,
     exercises: [{ id: `${id}-bench`, templateExerciseId: 'bench', name: 'Bankdrücken', sets: 3, weightKg: 72.5, reps: 8, position: 0 }],
+  }
+}
+
+function run(id: string, date: string): RunningSession {
+  const fingerprint = [...id].map((character) => character.charCodeAt(0).toString(16).padStart(2, '0')).join('').padEnd(64, '0').slice(0, 64)
+  return {
+    id, environment: 'outdoor', date, startTime: '14:36', durationSeconds: 2410, distanceKm: 5.27,
+    averagePaceSecondsPerKm: 457, averageHeartRateBpm: 161, effort: 6, activeCalories: 445,
+    totalCalories: 514, elevationGainM: 2, averagePowerWatts: 180, averageCadenceSpm: 142,
+    source: 'screenshot', fingerprint, createdAt: `${date}T15:20:00Z`,
   }
 }
 
@@ -58,6 +68,92 @@ describe('GYM-Workflow', () => {
     expect(screen.queryByText('01.08.26')).not.toBeInTheDocument()
   })
 
+  it('zeigt Laufen als gleichwertige Kachel, aber keinerlei Laufhistorie auf der Landing', async () => {
+    const user = userEvent.setup()
+    const onOpenRunImport = vi.fn()
+    const data = withPushExercise()
+    data.runs = [run('run-current', todayKey())]
+    render(<GymView data={data} onChange={vi.fn()} onOpenRunImport={onOpenRunImport} />)
+
+    expect(screen.getByRole('heading', { name: 'GYM' })).toHaveClass('training-section-label')
+    const runCard = screen.getByRole('button', { name: 'Lauf per Screenshot hinzufügen' })
+    expect(runCard).toHaveClass('gym-split-card', 'gym-split-start', 'run-split-start')
+    expect(screen.queryByText('5,27 km')).not.toBeInTheDocument()
+    expect(screen.queryByText(formatShortDate(todayKey()))).not.toBeInTheDocument()
+    await user.click(runCard)
+    expect(onOpenRunImport).toHaveBeenCalledOnce()
+  })
+
+  it('gliedert Läufe im gemeinsamen Verlauf nach Jahr, Monat und KW und klappt Details auf', async () => {
+    const user = userEvent.setup()
+    const data = withPushExercise()
+    data.gymSessions = [session('strength', todayKey())]
+    data.runs = [run('run-current', todayKey()), run('run-old', '2026-07-10')]
+    render(<GymView data={data} onChange={vi.fn()} onOpenRunImport={vi.fn()} />)
+
+    await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
+    expect(screen.getByRole('button', { name: 'GYM' })).toHaveAttribute('aria-pressed', 'true')
+    await user.click(screen.getByRole('button', { name: 'Laufen' }))
+    expect(screen.getByRole('button', { name: 'Laufen' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByText('Push')).not.toBeInTheDocument()
+    const currentMonth = historyDateGroup(todayKey()).monthLabel
+    expect(screen.getByRole('button', { name: new RegExp(`${currentMonth}.*1 Lauf`) })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: /Juli.*1 Lauf/ })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('heading', { name: historyDateGroup(todayKey()).isoWeekLabel })).toBeInTheDocument()
+    const summary = screen.getByRole('button', { name: /Outdoor · 5,27 km.*40:10 · 7:37 \/km/ })
+    await user.click(summary)
+    expect(summary).toHaveAttribute('aria-controls')
+    expect(screen.getByRole('region', { name: new RegExp(`Details zum Lauf vom ${formatShortDate(todayKey()).replaceAll('.', '\\.')}`) })).toBeInTheDocument()
+    expect(screen.getByText('14:36 Uhr')).toBeInTheDocument()
+    expect(screen.getByText('161 BPM')).toBeInTheDocument()
+    expect(screen.getByText('6/10')).toBeInTheDocument()
+    expect(screen.getByText('180 W')).toBeInTheDocument()
+  })
+
+  it('sortiert Läufe stabil absteigend und kennzeichnet ISO-Wochen an Jahres- und Monatsgrenzen eindeutig', async () => {
+    const user = userEvent.setup()
+    const data = withPushExercise()
+    const morning = { ...run('morning', '2026-09-14'), startTime: '08:00' }
+    const evening = { ...run('evening', '2026-09-14'), startTime: '18:00' }
+    data.runs = [run('new-year', '2027-01-01'), run('old-year', '2026-12-31'), run('august-boundary', '2026-08-31'), morning, evening]
+    render(<GymView data={data} onChange={vi.fn()} onOpenRunImport={vi.fn()} />)
+
+    await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
+    await user.click(screen.getByRole('button', { name: 'Laufen' }))
+    const yearHeadings = screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent)
+    expect(yearHeadings).toEqual(['2027', '2026'])
+    expect(screen.getByRole('button', { name: /September.*2 Läufe/ })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: /August.*1 Lauf/ })).toHaveAttribute('aria-expanded', 'false')
+    const january = screen.getByRole('button', { name: /Januar.*1 Lauf/ })
+    expect(january).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getAllByRole('time').map((node) => node.textContent)).toEqual(['14.09.26', '14.09.26'])
+    const summaries = screen.getAllByRole('button', { name: /Outdoor · 5,27 km/ })
+    expect(summaries[0]).toHaveAccessibleName(/18:00/)
+    expect(summaries[1]).toHaveAccessibleName(/08:00/)
+    await user.click(january)
+    expect(screen.getByRole('heading', { name: 'KW 53 · 2026' })).toBeInTheDocument()
+  })
+
+  it('löscht einen Lauf nur nach Bestätigung und behält ihn bei abgelehnter Vormerkung', async () => {
+    const user = userEvent.setup()
+    const confirm = vi.spyOn(window, 'confirm')
+    const onChange = vi.fn(() => false)
+    const data = withPushExercise()
+    data.runs = [run('run-current', todayKey())]
+    render(<GymView data={data} onChange={onChange} onOpenRunImport={vi.fn()} />)
+    await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
+    await user.click(screen.getByRole('button', { name: 'Laufen' }))
+    await user.click(screen.getByRole('button', { name: /Outdoor · 5,27 km/ }))
+
+    confirm.mockReturnValueOnce(false)
+    await user.click(screen.getByRole('button', { name: 'Lauf löschen' }))
+    expect(onChange).not.toHaveBeenCalled()
+    confirm.mockReturnValueOnce(true)
+    await user.click(screen.getByRole('button', { name: 'Lauf löschen' }))
+    expect(onChange).toHaveBeenCalledOnce()
+    expect(screen.getByRole('button', { name: 'Lauf löschen' })).toBeInTheDocument()
+  })
+
   it('öffnet den Verlauf date-first, klappt Snapshots auf und löscht bestätigt', async () => {
     const user = userEvent.setup()
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
@@ -75,8 +171,8 @@ describe('GYM-Workflow', () => {
     await user.click(screen.getByRole('button', { name: 'Training löschen' }))
     expect(confirm).toHaveBeenCalledOnce()
     expect(screen.queryByText('01.08.26')).not.toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Zurück zu GYM' }))
-    expect(screen.getByRole('heading', { name: 'GYM' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Zurück zu Training' }))
+    expect(screen.getByRole('heading', { name: 'Training' })).toBeInTheDocument()
   })
 
   it('zeigt einen klaren Empty State im Trainingsverlauf', async () => {
@@ -141,7 +237,7 @@ describe('GYM-Workflow', () => {
     expect(july).toHaveAttribute('aria-expanded', 'true')
     expect(august.closest('.gym-history-month')).not.toHaveClass('is-expanded')
 
-    await user.click(screen.getByRole('button', { name: 'Zurück zu GYM' }))
+    await user.click(screen.getByRole('button', { name: 'Zurück zu Training' }))
     await user.click(screen.getByRole('button', { name: 'Trainingsverlauf öffnen' }))
     expect(screen.getByRole('button', { name: /August.*2 Einheiten/ })).toHaveAttribute('aria-expanded', 'false')
     expect(screen.getByRole('button', { name: /Juli.*1 Einheit/ })).toHaveAttribute('aria-expanded', 'true')
@@ -175,7 +271,7 @@ describe('GYM-Workflow', () => {
     await user.click(january)
     expect(january).toHaveAttribute('aria-expanded', 'false')
 
-    await user.click(screen.getByRole('button', { name: 'Zurück zu GYM' }))
+    await user.click(screen.getByRole('button', { name: 'Zurück zu Training' }))
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: 'Training starten' }))
     await fillEmptyReps(user)
@@ -325,7 +421,7 @@ describe('GYM-Workflow', () => {
     await user.click(screen.getByRole('button', { name: 'Core löschen' }))
     expect(confirm).toHaveBeenCalledOnce()
     expect(screen.queryByRole('button', { name: 'Core bearbeiten' })).not.toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Zurück zu GYM' }))
+    await user.click(screen.getByRole('button', { name: 'Zurück zu Training' }))
     expect(screen.getByRole('button', { name: 'Push starten' })).toBeInTheDocument()
   })
 
@@ -584,7 +680,7 @@ describe('GYM-Workflow', () => {
     await user.click(screen.getByRole('button', { name: /20.08.26/ }))
     expect(screen.getByText('Nicht erfasst')).toBeInTheDocument()
     expect(screen.queryByText(/200 kg/)).not.toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Zurück zu GYM' }))
+    await user.click(screen.getByRole('button', { name: 'Zurück zu Training' }))
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: 'Training starten' }))
 
@@ -610,7 +706,7 @@ describe('GYM-Workflow', () => {
     await user.click(screen.getByRole('button', { name: /20.08.26/ }))
     expect(screen.getAllByText(/Nicht erfasst/)).toHaveLength(3)
     expect(document.body).not.toHaveTextContent(/Körpergewicht|\bBW\b/)
-    await user.click(screen.getByRole('button', { name: 'Zurück zu GYM' }))
+    await user.click(screen.getByRole('button', { name: 'Zurück zu Training' }))
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: 'Training starten' }))
 
@@ -941,7 +1037,7 @@ describe('GYM-Workflow', () => {
     await user.tab()
     expect(target).toHaveValue('8–12')
     await user.click(screen.getByRole('button', { name: 'Einheit speichern' }))
-    await user.click(screen.getByRole('button', { name: 'Zurück zu GYM' }))
+    await user.click(screen.getByRole('button', { name: 'Zurück zu Training' }))
     await user.click(screen.getByRole('button', { name: 'Push starten' }))
     await user.click(screen.getByRole('button', { name: 'Training starten' }))
 

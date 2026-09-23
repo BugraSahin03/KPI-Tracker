@@ -2,11 +2,12 @@ import {
   differenceInCalendarDays,
   getDay,
   getMonth,
+  startOfISOWeek,
   startOfDay,
   startOfMonth,
   subMonths,
 } from 'date-fns'
-import type { AppData, BodyMetric, DailyEntry, GoalStatus, GymSession, GymTemplateExercise } from '../types'
+import type { AppData, BodyMetric, DailyEntry, GoalStatus, GymSession, GymTemplateExercise, RunningSession, WeeklyGoal } from '../types'
 import { dateRange, toDateKey } from './date'
 import { createInitialData } from './storage'
 
@@ -127,10 +128,32 @@ export function createDemoData(anchor = new Date()): AppData {
     })
   }
 
+  const runs: RunningSession[] = []
+  for (let offset = 5; offset <= oldestGymOffset; offset += 4) {
+    const runDate = new Date(normalizedAnchor)
+    runDate.setDate(runDate.getDate() - offset)
+    const date = toDateKey(runDate)
+    const distanceKm = offset % 8 === 1 ? 7.5 : 5.2
+    const durationSeconds = Math.round(distanceKm * (390 + (offset % 5) * 8))
+    runs.push({
+      id: `demo-run-${date}`, environment: offset % 3 === 0 ? 'indoor' : 'outdoor', date, startTime: '18:10', durationSeconds,
+      distanceKm, averagePaceSecondsPerKm: Math.round(durationSeconds / distanceKm), averageHeartRateBpm: 148 + offset % 12,
+      effort: 5 + offset % 3, source: 'manual', fingerprint: offset.toString(16).padStart(64, '0'), createdAt: `${date}T19:00:00.000Z`,
+    })
+  }
+  const weeklyStart = toDateKey(startOfISOWeek(new Date(normalizedAnchor.getFullYear(), normalizedAnchor.getMonth(), normalizedAnchor.getDate() - oldestGymOffset)))
+  const weeklyGoals: WeeklyGoal[] = [
+    { id: 'demo-weekly-gym', name: '3× GYM', targetCount: 3, sourceType: 'gym', gymTemplateIds: [], color: '#c6ff3d', icon: 'gym', createdAt: weeklyStart, startDate: weeklyStart, active: true, countingMode: 'unique-days', definitions: [{ effectiveFrom: weeklyStart, name: '3× GYM', targetCount: 3, sourceType: 'gym', gymTemplateIds: [], color: '#c6ff3d', icon: 'gym', active: true, countingMode: 'unique-days' }] },
+    { id: 'demo-weekly-run', name: '2× Laufen', targetCount: 2, sourceType: 'run', runEnvironment: 'any', color: '#4dc5ff', icon: 'run', createdAt: weeklyStart, startDate: weeklyStart, active: true, countingMode: 'unique-days', definitions: [{ effectiveFrom: weeklyStart, name: '2× Laufen', targetCount: 2, sourceType: 'run', runEnvironment: 'any', color: '#4dc5ff', icon: 'run', active: true, countingMode: 'unique-days' }] },
+  ]
+
   return {
     ...data,
     entries,
     bodyMetrics,
     gymSessions,
+    runs,
+    weeklyGoals,
+    weeklyGoalAdjustments: [],
   }
 }

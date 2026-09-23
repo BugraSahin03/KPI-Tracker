@@ -120,4 +120,4 @@ du -sh /var/lib/pace /var/backups/pace
 sudo -u pace /usr/bin/node /opt/pace/current/scripts/backup/verify-database.mjs /var/lib/pace/pace.sqlite
 ```
 
-Erwartet: Health HTTP 200, `sqliteReady:true`, Schema 10, `quick_check=ok`, keine Google-Health-Routen (404) und ausreichend freier Speicher. Fehlerhafte Health-Antworten enthalten keine Profildaten.
+Erwartet: Health HTTP 200, `sqliteReady:true`, Schema 12, `quick_check=ok`, keine Google-Health-Routen (404) und ausreichend freier Speicher. Fehlerhafte Health-Antworten enthalten keine Profildaten.

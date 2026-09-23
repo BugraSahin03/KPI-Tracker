@@ -77,4 +77,33 @@ describe('persistente Mutationsqueue', () => {
     expect(renamed.gymTemplates[0]!.exercises[0]!.name).toBe('Schrägbankdrücken')
     expect(applyPendingMutations(renamed, loadPendingMutations(), 'profile-bugra')).toEqual(renamed)
   })
+
+  it('persistiert Lauf-Erstellung und -Löschung profilgetrennt für den Offline-Retry', () => {
+    const data = createInitialData('2026-09-14')
+    const run = {
+      id: 'offline-run', environment: 'outdoor' as const, date: '2026-09-14', startTime: '18:00', durationSeconds: 1800,
+      distanceKm: 5, averagePaceSecondsPerKm: 360, source: 'screenshot' as const, fingerprint: 'c'.repeat(64), createdAt: '2026-09-14T18:30:00Z',
+    }
+    const create: DataMutation = { id: 'create-offline-run', kind: 'run.create', run }
+    const remove: DataMutation = { id: 'remove-offline-run', kind: 'run.delete', runId: run.id }
+    expect(persistPendingMutations([{ profileId: 'profile-bugra', mutation: create }])).toBe(true)
+    const restored = loadPendingMutations()
+    expect(applyPendingMutations(data, restored, 'profile-bugra').runs).toEqual([run])
+    expect(applyPendingMutations(data, restored, 'profile-sena')).toBe(data)
+    expect(applyPendingMutations({ ...data, runs: [run] }, [{ profileId: 'profile-bugra', mutation: remove }], 'profile-bugra').runs).toEqual([])
+  })
+
+  it('persistiert Wochenziel und Tageskorrektur profilgetrennt für den Retry', () => {
+    const data = createInitialData('2026-09-21')
+    const definition = { effectiveFrom: '2026-09-21', name: '2× Mobility', targetCount: 2, sourceType: 'manual' as const, color: '#a78bfa', icon: 'calendar' as const, active: true, countingMode: 'unique-days' as const }
+    const goal = { id: 'weekly-mobility', ...definition, createdAt: '2026-09-21', startDate: '2026-09-21', definitions: [definition] }
+    const mutations: DataMutation[] = [
+      { id: 'weekly-create-offline', kind: 'weekly-goal.upsert', goal },
+      { id: 'weekly-adjust-offline', kind: 'weekly-goal.adjust', adjustment: { goalId: goal.id, date: '2026-09-21', status: 'done', updatedAt: '2026-09-21T12:00:00Z' } },
+    ]
+    persistPendingMutations(mutations.map((mutation) => ({ profileId: 'profile-bugra', mutation })))
+    const restored = loadPendingMutations()
+    expect(applyPendingMutations(data, restored, 'profile-bugra')).toMatchObject({ weeklyGoals: [goal], weeklyGoalAdjustments: [expect.objectContaining({ status: 'done' })] })
+    expect(applyPendingMutations(data, restored, 'profile-sena')).toBe(data)
+  })
 })

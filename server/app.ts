@@ -1,12 +1,13 @@
 import express, { type NextFunction, type Request, type Response } from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
-import { isBodyMetric, isEntry, isGoal, isGymSession, isGymTemplate, normalizeAppData } from '../src/lib/storage.js'
+import { isBodyMetric, isEntry, isGoal, isGymSession, isGymTemplate, isRunningSession, isWeeklyGoal, isWeeklyGoalAdjustment, normalizeAppData } from '../src/lib/storage.js'
 import { DEFAULT_PROFILE_ID, type AppData, type DataMutation } from '../src/types.js'
 import type { PaceDatabase } from './db.js'
 import type { GoogleHealthService } from './google-health.js'
 import { config } from './config.js'
 import { dateKeyInTimeZone } from './time.js'
+import { recognizeRunScreenshot } from './run-screenshot.js'
 
 type AppOptions = {
   now?: () => Date
@@ -42,7 +43,7 @@ export function createApp(database: PaceDatabase, googleHealth: GoogleHealthServ
     response.setHeader('Referrer-Policy', 'same-origin')
     response.setHeader('X-Frame-Options', 'DENY')
     response.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()')
-    response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
+    response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
     next()
   })
   app.use(express.json({ limit: '2mb', type: 'application/json' }))
@@ -71,6 +72,12 @@ export function createApp(database: PaceDatabase, googleHealth: GoogleHealthServ
     try {
       const profileId = typeof request.query.profileId === 'string' ? request.query.profileId : DEFAULT_PROFILE_ID
       return response.json(envelope(profileId))
+    } catch (error) { return next(error) }
+  })
+  app.post('/api/runs/screenshot/recognize', express.raw({ type: 'application/octet-stream', limit: '12mb' }), async (request, response, next) => {
+    try {
+      if (!Buffer.isBuffer(request.body) || request.body.length === 0) return response.status(400).json({ error: 'Bitte zuerst einen Screenshot auswählen.' })
+      return response.json(await recognizeRunScreenshot(request.body, now(), timeZone))
     } catch (error) { return next(error) }
   })
   app.post('/api/mutations', (request, response, next) => {
@@ -139,10 +146,13 @@ export function createApp(database: PaceDatabase, googleHealth: GoogleHealthServ
   app.use((error: Error & { code?: string }, _request: Request, response: Response, _next: NextFunction) => {
     void _next
     console.error(error)
+    if ((error as Error & { type?: string }).type === 'entity.too.large') return response.status(413).json({ error: 'Der Screenshot darf höchstens 12 MB groß sein.' })
     if (error instanceof SyntaxError && 'body' in error) return response.status(400).json({ error: 'Ungültiges JSON.' })
     if (error.code === 'PROFILE_NOT_FOUND') return response.status(404).json({ error: error.message })
-    if (error.code === 'IMPORT_PROFILE_FORBIDDEN' || error.code === 'DATA_INTEGRITY') return response.status(400).json({ error: error.message })
-    if (error.code === 'REVISION_CONFLICT' || error.code === 'IMPORT_CONFLICT' || error.code === 'GYM_EXERCISE_CONFLICT') return response.status(409).json({ error: error.message })
+    if (error.code === 'IMPORT_PROFILE_FORBIDDEN' || error.code === 'DATA_INTEGRITY' || error.code === 'UNSUPPORTED_IMAGE') return response.status(400).json({ error: error.message })
+    if (error.code === 'OCR_BUSY') return response.status(429).json({ error: error.message })
+    if (error.code === 'OCR_FAILED') return response.status(503).json({ error: error.message })
+    if (error.code === 'REVISION_CONFLICT' || error.code === 'IMPORT_CONFLICT' || error.code === 'GYM_EXERCISE_CONFLICT' || error.code === 'RUN_DUPLICATE') return response.status(409).json({ error: error.message })
     if (error.name === 'SqliteError' && ['SQLITE_CONSTRAINT_FOREIGNKEY', 'SQLITE_CONSTRAINT_UNIQUE'].includes(error.code ?? '')) {
       return response.status(400).json({ error: 'Mutation verletzt die Datenintegrität.' })
     }
@@ -164,6 +174,11 @@ function futureMutationError(mutation: DataMutation, today: string, timeZone: st
   if (mutation.kind === 'body.upsert' && mutation.metric.date > today) return `Messdatum liegt in der Zukunft (${timeZone}).`
   if (mutation.kind === 'goal.upsert') return futureGoalError(mutation.goal, today, timeZone)
   if (mutation.kind === 'gym.session.complete' && mutation.session.date > today) return `Trainingstag liegt in der Zukunft (${timeZone}).`
+  if (mutation.kind === 'run.create' && mutation.run.date > today) return `Laufdatum liegt in der Zukunft (${timeZone}).`
+  if (mutation.kind === 'weekly-goal.adjust' && mutation.adjustment.date > today) return `Wochenziel-Datum liegt in der Zukunft (${timeZone}).`
+  if (mutation.kind === 'weekly-goal.upsert' && (mutation.goal.startDate > today || mutation.goal.definitions.some((definition) => definition.effectiveFrom > today))) {
+    return `Wochenziel-Beginndatum liegt in der Zukunft (${timeZone}).`
+  }
   return undefined
 }
 
@@ -175,6 +190,11 @@ function futureImportError(data: AppData, today: string, timeZone: string) {
     if (error) return `Import: ${error}`
   }
   if (data.gymSessions.some((session) => session.date > today)) return `Import enthält einen zukünftigen Trainingstag (${timeZone}).`
+  if ((data.runs ?? []).some((run) => run.date > today)) return `Import enthält einen zukünftigen Lauf (${timeZone}).`
+  if ((data.weeklyGoalAdjustments ?? []).some((item) => item.date > today)) return `Import enthält eine zukünftige Wochenziel-Anpassung (${timeZone}).`
+  if ((data.weeklyGoals ?? []).some((goal) => goal.startDate > today || goal.definitions.some((definition) => definition.effectiveFrom > today))) {
+    return `Import enthält ein zukünftiges Wochenziel (${timeZone}).`
+  }
   return undefined
 }
 
@@ -194,6 +214,15 @@ function isDataMutation(value: unknown): value is DataMutation {
   if (mutation.kind === 'gym.template.delete') return validId(mutation.templateId)
   if (mutation.kind === 'gym.session.complete') return isGymSession(mutation.session)
   if (mutation.kind === 'gym.session.delete') return validId(mutation.sessionId)
+  if (mutation.kind === 'run.create') return isRunningSession(mutation.run)
+  if (mutation.kind === 'run.delete') return validId(mutation.runId)
+  if (mutation.kind === 'weekly-goal.upsert') return isWeeklyGoal(mutation.goal)
+  if (mutation.kind === 'weekly-goal.delete') return validId(mutation.goalId)
+  if (mutation.kind === 'weekly-goal.adjust') {
+    const adjustment = mutation.adjustment as Record<string, unknown> | undefined
+    if (adjustment?.status === 'open') return validId(adjustment.goalId) && typeof adjustment.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(adjustment.date) && typeof adjustment.updatedAt === 'string' && !Number.isNaN(Date.parse(adjustment.updatedAt))
+    return isWeeklyGoalAdjustment(adjustment)
+  }
   if (mutation.kind === 'gym.exercise.merge') return validId(mutation.sourceExerciseId) && validId(mutation.targetExerciseId) && mutation.sourceExerciseId !== mutation.targetExerciseId &&
     typeof mutation.expectedSourceName === 'string' && mutation.expectedSourceName.trim().length > 0 && typeof mutation.expectedTargetName === 'string' && mutation.expectedTargetName.trim().length > 0
   if (mutation.kind === 'gym.exercise.rename') return validId(mutation.exerciseId) && typeof mutation.expectedName === 'string' && mutation.expectedName.trim().length > 0 &&
