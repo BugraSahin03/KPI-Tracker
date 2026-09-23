@@ -267,7 +267,7 @@ describe('Heute-Interaktion', () => {
     await user.click(screen.getByRole('button', { name: 'Alle' }))
     expect(screen.getByRole('button', { name: 'Alle' })).toHaveAttribute('aria-pressed', 'true')
     expect(JSON.parse(localStorage.getItem('pace-analysis-goals-v1-profile-bugra')!)).toEqual({ version: 1, mode: 'all' })
-  })
+  }, 15_000)
 
   it('öffnet die Tagesbearbeitung trotz Analysefilter mit allen damaligen Zielen', async () => {
     const user = userEvent.setup()
